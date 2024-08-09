@@ -31,6 +31,7 @@ import { cn, getExtension } from "@/lib/utils";
 
 import PortraitLandscape from "../shared/icons/portrait-landscape";
 import LoadingSpinner from "../ui/loading-spinner";
+import { ButtonTooltip } from "../ui/tooltip";
 import { AddDocumentModal } from "./add-document-modal";
 import { AddToDataroomModal } from "./add-document-to-dataroom-modal";
 
@@ -56,6 +57,7 @@ export default function DocumentHeader({
   const [isFirstClick, setIsFirstClick] = useState<boolean>(false);
   const [orientationLoading, setOrientationLoading] = useState<boolean>(false);
   const [addDataroomOpen, setAddDataroomOpen] = useState<boolean>(false);
+  const [addDocumentVersion, setAddDocumentVersion] = useState<boolean>(false);
 
   const nameRef = useRef<HTMLHeadingElement>(null);
   const enterPressedRef = useRef<boolean>(false);
@@ -72,12 +74,12 @@ export default function DocumentHeader({
 
   // https://github.com/radix-ui/primitives/issues/1241#issuecomment-1888232392
   useEffect(() => {
-    if (!addDataroomOpen) {
+    if (!addDataroomOpen || !addDocumentVersion) {
       setTimeout(() => {
         document.body.style.pointerEvents = "";
       });
     }
-  }, [addDataroomOpen]);
+  }, [addDataroomOpen, addDocumentVersion]);
 
   const handleNameSubmit = async () => {
     if (enterPressedRef.current) {
@@ -331,18 +333,20 @@ export default function DocumentHeader({
 
       <div className="flex items-center gap-x-4 md:gap-x-2 lg:gap-x-4">
         {!orientationLoading ? (
-          <button
-            className="hidden md:flex"
-            onClick={changeDocumentOrientation}
-            title={`Change document orientation to ${primaryVersion.isVertical ? "landscape" : "portrait"}`}
-          >
-            <PortraitLandscape
-              className={cn(
-                "h-6 w-6",
-                !primaryVersion.isVertical && "-rotate-90 transform",
-              )}
-            />
-          </button>
+          <ButtonTooltip content="Change orientation">
+            <button
+              className="hidden md:flex"
+              onClick={changeDocumentOrientation}
+              title={`Change document orientation to ${primaryVersion.isVertical ? "landscape" : "portrait"}`}
+            >
+              <PortraitLandscape
+                className={cn(
+                  "h-6 w-6",
+                  !primaryVersion.isVertical && "-rotate-90 transform",
+                )}
+              />
+            </button>
+          </ButtonTooltip>
         ) : (
           <div className="hidden md:flex">
             <LoadingSpinner className="h-6 w-6" />
@@ -402,10 +406,17 @@ export default function DocumentHeader({
             <DropdownMenuLabel>Actions</DropdownMenuLabel>
             <DropdownMenuGroup className="block md:hidden">
               <DropdownMenuItem>
-                <AddDocumentModal newVersion>
+                <AddDocumentModal
+                  newVersion
+                  setAddDocumentModalOpen={setAddDocumentVersion}
+                >
                   <button
                     title="Add a new version"
                     className="flex items-center"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setAddDocumentVersion(true);
+                    }}
                   >
                     <FileUp className="mr-2 h-4 w-4" /> Add new version
                   </button>
