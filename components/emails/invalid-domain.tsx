@@ -12,10 +12,12 @@ import {
   Section,
   Tailwind,
   Text,
-} from "@react-email/components";
+} from "react-email";
+
+import { Footer } from "./shared/footer";
 
 export default function InvalidDomain({
-  domain = "papermark.io",
+  domain = "papermark.com",
   invalidDays = 14,
 }: {
   domain: string;
@@ -51,7 +53,7 @@ export default function InvalidDomain({
             <Section className="my-8 text-center">
               <Button
                 className="rounded bg-black text-center text-xs font-semibold text-white no-underline"
-                href={`https://app.papermark.io/settings/domains`}
+                href={`https://app.papermark.com/settings/domains`}
                 style={{ padding: "12px 20px" }}
               >
                 Configure domain
@@ -60,7 +62,7 @@ export default function InvalidDomain({
             <Text className="text-sm leading-6 text-black">
               If you do not want to keep this domain on Papermark, you can{" "}
               <Link
-                href={`https://app.papermark.io/settings/domains`}
+                href={`https://app.papermark.com/settings/domains`}
                 className="font-medium text-blue-600 no-underline"
               >
                 delete it
@@ -77,23 +79,7 @@ export default function InvalidDomain({
                   }`
                 : ""}
             </Text>
-            <Hr />
-            <Section className="mt-8 text-gray-400">
-              <Text className="text-xs">
-                © {new Date().getFullYear()}{" "}
-                <a
-                  href="https://www.papermark.io"
-                  className="text-gray-400 no-underline visited:text-gray-400 hover:text-gray-400"
-                  target="_blank"
-                >
-                  papermark.io
-                </a>
-              </Text>
-              <Text className="text-xs">
-                If you have any feedback or questions about this email, simply
-                reply to it. I&apos;d love to hear from you!
-              </Text>
-            </Section>
+            <Footer />
           </Container>
         </Body>
       </Tailwind>

@@ -6,14 +6,16 @@ import {
 
 export const addDomainToVercel = async (domain: string) => {
   return await fetch(
-    `https://api.vercel.com/v9/projects/${process.env.PROJECT_ID_VERCEL}/domains?teamId=${process.env.TEAM_ID_VERCEL}`,
+    `https://api.vercel.com/v10/projects/${process.env.PROJECT_ID_VERCEL}/domains?teamId=${process.env.TEAM_ID_VERCEL}`,
     {
-      body: `{\n  "name": "${domain}"\n}`,
+      method: "POST",
       headers: {
         Authorization: `Bearer ${process.env.AUTH_BEARER_TOKEN}`,
         "Content-Type": "application/json",
       },
-      method: "POST",
+      body: JSON.stringify({
+        name: domain.toLowerCase(),
+      }),
     },
   ).then((res) => res.json());
 };
@@ -122,7 +124,7 @@ export const getApexDomain = (url: string) => {
     // if it's a subdomain (e.g. papermark.vercel.app), return the last 2 parts
     return parts.slice(-2).join(".");
   }
-  // if it's a normal domain (e.g. papermark.io), we return the domain
+  // if it's a normal domain (e.g. papermark.com), we return the domain
   return domain;
 };
 

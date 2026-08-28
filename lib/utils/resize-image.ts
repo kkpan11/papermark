@@ -62,8 +62,17 @@ export const resizeImage = (
           targetHeight,
         );
 
-        // Convert the canvas to a base64 string
-        const base64Image = canvas.toDataURL("image/jpeg", opts.quality);
+        // Canvas only reliably encodes JPEG/PNG. Passing image/x-icon or
+        // image/svg+xml is unsupported and can yield an empty/odd data URL
+        // depending on the browser — normalize so uploads always get a
+        // blob-safe MIME that /api/file/image-upload accepts.
+        const originalType = file.type || "image/png";
+        const exportType =
+          originalType === "image/jpeg" || originalType === "image/jpg"
+            ? "image/jpeg"
+            : "image/png";
+
+        const base64Image = canvas.toDataURL(exportType, opts.quality);
         resolve(base64Image);
       };
       img.onerror = (error) =>

@@ -1,12 +1,12 @@
 import { memo, useMemo } from "react";
 
-import { TSelectedFolder } from "@/components/documents/move-folder-modal";
-import { FileTree } from "@/components/ui/nextra-filetree";
-
 import {
   DataroomFolderWithDocuments,
   useDataroomFoldersTree,
 } from "@/lib/swr/use-dataroom";
+
+import { TSelectedFolder } from "@/components/documents/move-folder-modal";
+import { FileTree } from "@/components/ui/nextra-filetree";
 
 import { buildNestedFolderStructure } from "./utils";
 
@@ -15,12 +15,18 @@ const FolderComponentSelection = memo(
     folder,
     selectedFolder,
     setSelectedFolder,
+    disableId,
+    ancestorDisabled,
   }: {
     folder: DataroomFolderWithDocuments;
+    disableId?: string[];
     selectedFolder: TSelectedFolder;
     setSelectedFolder: React.Dispatch<React.SetStateAction<TSelectedFolder>>;
+    ancestorDisabled?: boolean;
   }) => {
-    // Recursively render child folders if they exist
+    const isSelfDisabled = disableId?.includes(folder.id) ?? false;
+    const isDisabled = ancestorDisabled || isSelfDisabled;
+
     const childFolders = useMemo(
       () =>
         folder.childFolders.map((childFolder) => (
@@ -28,10 +34,18 @@ const FolderComponentSelection = memo(
             key={childFolder.id}
             folder={childFolder}
             selectedFolder={selectedFolder}
+            disableId={disableId}
             setSelectedFolder={setSelectedFolder}
+            ancestorDisabled={isDisabled}
           />
         )),
-      [folder.childFolders, selectedFolder, setSelectedFolder],
+      [
+        folder.childFolders,
+        selectedFolder,
+        setSelectedFolder,
+        disableId,
+        isDisabled,
+      ],
     );
 
     const isActive = folder.id === selectedFolder?.id;
@@ -44,17 +58,29 @@ const FolderComponentSelection = memo(
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
-          setSelectedFolder({ id: folder.id, name: folder.name });
+          if (isDisabled) return;
+          path: folder.path,
+            setSelectedFolder({
+              id: folder.id,
+              name: folder.name,
+              path: folder.path,
+            });
         }}
       >
         <FileTree.Folder
+          disable={isDisabled}
           name={folder.name}
           key={folder.id}
           active={isActive}
           childActive={isChildActive}
-          onToggle={() =>
-            setSelectedFolder({ id: folder.id, name: folder.name })
-          }
+          onToggle={() => {
+            if (isDisabled) return;
+            setSelectedFolder({
+              id: folder.id,
+              name: folder.name,
+              path: folder.path,
+            });
+          }}
         >
           {childFolders}
         </FileTree.Folder>
@@ -68,8 +94,10 @@ const SidebarFoldersSelection = ({
   folders,
   selectedFolder,
   setSelectedFolder,
+  disableId,
 }: {
   folders: DataroomFolderWithDocuments[];
+  disableId?: string[];
   selectedFolder: TSelectedFolder;
   setSelectedFolder: React.Dispatch<React.SetStateAction<TSelectedFolder>>;
 }) => {
@@ -99,6 +127,7 @@ const SidebarFoldersSelection = ({
         folder={homeFolder}
         selectedFolder={selectedFolder}
         setSelectedFolder={setSelectedFolder}
+        disableId={disableId}
       />
       {/* ))} */}
     </FileTree>
@@ -109,8 +138,10 @@ export function SidebarFolderTreeSelection({
   dataroomId,
   selectedFolder,
   setSelectedFolder,
+  disableId,
 }: {
   dataroomId: string;
+  disableId?: string[];
   selectedFolder: TSelectedFolder;
   setSelectedFolder: React.Dispatch<React.SetStateAction<TSelectedFolder>>;
 }) {
@@ -123,6 +154,7 @@ export function SidebarFolderTreeSelection({
       folders={folders}
       selectedFolder={selectedFolder}
       setSelectedFolder={setSelectedFolder}
+      disableId={disableId}
     />
   );
 }

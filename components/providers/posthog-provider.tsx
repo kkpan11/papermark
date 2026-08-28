@@ -21,6 +21,7 @@ export const PostHogCustomProvider = ({
       api_host: posthogConfig.host,
       ui_host: "https://eu.posthog.com",
       disable_session_recording: true,
+      autocapture: false,
       // Enable debug mode in development
       loaded: (posthog) => {
         if (process.env.NODE_ENV === "development") posthog.debug();
@@ -30,6 +31,10 @@ export const PostHogCustomProvider = ({
               posthog.identify(
                 (session.user as CustomUser).email ??
                   (session.user as CustomUser).id,
+                {
+                  email: (session.user as CustomUser).email,
+                  userId: (session.user as CustomUser).id,
+                },
               );
             } else {
               posthog.reset();

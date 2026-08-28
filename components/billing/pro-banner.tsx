@@ -1,7 +1,7 @@
 import { Dispatch, SetStateAction } from "react";
 
+import { PlanEnum } from "@/ee/stripe/constants";
 import Cookies from "js-cookie";
-import { usePlausible } from "next-plausible";
 
 import X from "@/components/shared/icons/x";
 import { Button } from "@/components/ui/button";
@@ -13,11 +13,8 @@ export default function ProBanner({
 }: {
   setShowProBanner: Dispatch<SetStateAction<boolean | null>>;
 }) {
-  const plausible = usePlausible();
-
   const handleHideBanner = () => {
     setShowProBanner(false);
-    plausible("clickedHideBanner");
     Cookies.set("hideProBanner", "pro-banner", {
       expires: 7,
     });
@@ -37,17 +34,14 @@ export default function ProBanner({
         <span className="text-sm font-bold">✨ Papermark Business ✨</span>
       </div>
       <p className="my-4 text-sm">
-        Join to unlock custom branding, domains, team members, and data rooms.
+        Upgrade to unlock custom branding, team members, domains and data rooms.
       </p>
       <div className="flex">
-        <UpgradePlanModal clickedPlan={"Business"} trigger={"pro_banner"}>
-          <Button
-            type="button"
-            className="grow"
-            onClick={() => {
-              plausible("clickedProBanner");
-            }}
-          >
+        <UpgradePlanModal
+          clickedPlan={PlanEnum.Business}
+          trigger={"pro_banner"}
+        >
+          <Button type="button" className="grow">
             Upgrade
           </Button>
         </UpgradePlanModal>

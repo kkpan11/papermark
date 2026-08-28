@@ -1,3 +1,5 @@
+import { useRouter } from "next/router";
+
 import { useMemo } from "react";
 
 import { UploadIcon } from "lucide-react";
@@ -5,72 +7,103 @@ import { useTheme } from "next-themes";
 import { useDropzone } from "react-dropzone";
 import { toast } from "sonner";
 
+import {
+  FREE_PLAN_ACCEPTED_FILE_TYPES,
+  FULL_PLAN_ACCEPTED_FILE_TYPES,
+  HTML_ACCEPTED_FILE_TYPES,
+  SUPPORTED_DOCUMENT_MIME_TYPES,
+} from "@/lib/constants";
+import { useFeatureFlags } from "@/lib/hooks/use-feature-flags";
 import { usePlan } from "@/lib/swr/use-billing";
+import useLimits from "@/lib/swr/use-limits";
 import { bytesToSize } from "@/lib/utils";
+import { isHtmlFile } from "@/lib/utils/get-content-type";
 import { fileIcon } from "@/lib/utils/get-file-icon";
+import {
+  getFileSizeLimit,
+  getFileSizeLimits,
+} from "@/lib/utils/get-file-size-limits";
 import { getPagesCount } from "@/lib/utils/get-page-number-count";
-
-const fileSizeLimits: { [key: string]: number } = {
-  "application/vnd.ms-excel": 40, // 40 MB
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": 40, // 40 MB
-  "application/vnd.oasis.opendocument.spreadsheet": 40, // 40 MB
-  "text/csv": 40, // 40 MB
-};
 
 export default function DocumentUpload({
   currentFile,
   setCurrentFile,
+  pdfOnly = false,
+  maxSizeBytes,
+  maxSizeErrorMessage,
 }: {
   currentFile: File | null;
   setCurrentFile: React.Dispatch<React.SetStateAction<File | null>>;
+  pdfOnly?: boolean;
+  maxSizeBytes?: number;
+  maxSizeErrorMessage?: string;
 }) {
+  const router = useRouter();
   const { theme, systemTheme } = useTheme();
   const isLight =
     theme === "light" || (theme === "system" && systemTheme === "light");
-  const { plan, trial } = usePlan();
-  const isFreePlan = plan === "free";
-  const isTrial = !!trial;
-  const maxSize = plan === "business" || plan === "datarooms" ? 100 : 30;
-  const maxNumPages = plan === "business" || plan === "datarooms" ? 500 : 100;
+  const { isFree, isTrial } = usePlan();
+  const { limits } = useLimits();
+  const { isFeatureEnabled } = useFeatureFlags();
+  const htmlDocumentsEnabled = isFeatureEnabled("htmlDocuments");
+
+  const fullPlanAcceptedFileTypes = useMemo(
+    () => ({
+      ...FULL_PLAN_ACCEPTED_FILE_TYPES,
+      ...(htmlDocumentsEnabled ? HTML_ACCEPTED_FILE_TYPES : {}),
+    }),
+    [htmlDocumentsEnabled],
+  );
+
+  const fileSizeLimits = useMemo(
+    () =>
+      getFileSizeLimits({
+        limits,
+        isFree,
+        isTrial,
+      }),
+    [limits, isFree, isTrial],
+  );
+
+  // When an explicit byte limit is provided (e.g. NDA signing template), use it instead of the plan limit.
+  const maxSizeMB =
+    typeof maxSizeBytes === "number"
+      ? Math.floor(maxSizeBytes / (1024 * 1024))
+      : undefined;
 
   const { getRootProps, getInputProps } = useDropzone({
-    accept:
-      isFreePlan && !isTrial
-        ? {
-            "application/pdf": [], // ".pdf"
-            "application/vnd.ms-excel": [], // ".xls"
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-              [], // ".xlsx"
-            "text/csv": [], // ".csv"
-            "application/vnd.oasis.opendocument.spreadsheet": [], // ".ods"
-          }
-        : {
-            "application/pdf": [], // ".pdf"
-            "application/vnd.ms-excel": [], // ".xls"
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-              [], // ".xlsx"
-            "text/csv": [], // ".csv"
-            "application/vnd.oasis.opendocument.spreadsheet": [], // ".ods"
-            "application/vnd.ms-powerpoint": [], // ".ppt"
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation":
-              [], // ".pptx"
-            "application/vnd.oasis.opendocument.presentation": [], // ".odp"
-            "application/msword": [], // ".doc"
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-              [], // ".docx"
-            "application/vnd.oasis.opendocument.text": [], // ".odt"
-          },
+    accept: pdfOnly
+      ? { "application/pdf": [".pdf"] }
+      : isFree && !isTrial
+        ? FREE_PLAN_ACCEPTED_FILE_TYPES
+        : fullPlanAcceptedFileTypes,
     multiple: false,
-    maxSize: maxSize * 1024 * 1024, // 30 MB
     onDropAccepted: (acceptedFiles) => {
+      if (acceptedFiles.length === 0) {
+        return;
+      }
       const file = acceptedFiles[0];
       const fileType = file.type;
-      const fileSizeLimit = fileSizeLimits[fileType] * 1024 * 1024;
+      const fileSizeLimitMB = getFileSizeLimit(fileType, fileSizeLimits); // in MB
+      const limitMB = maxSizeMB ?? fileSizeLimitMB; // displayed limit
+      const fileSizeLimit = maxSizeBytes ?? fileSizeLimitMB * 1024 * 1024; // in bytes
 
       if (file.size > fileSizeLimit) {
-        toast.error(
-          `File size too big for ${fileType} (max. ${fileSizeLimits[fileType]} MB)`,
-        );
+        const message =
+          maxSizeErrorMessage ||
+          `File size too big for ${fileType} (max. ${limitMB} MB)`;
+        if (!maxSizeErrorMessage && isFree && !isTrial) {
+          toast.error(message, {
+            description: "Upgrade to a paid plan to increase the limit",
+            action: {
+              label: "Upgrade",
+              onClick: () => router.push("/settings/billing/upgrade"),
+            },
+            duration: 10000,
+          });
+        } else {
+          toast.error(message);
+        }
         return;
       }
 
@@ -82,8 +115,10 @@ export default function DocumentUpload({
         .arrayBuffer()
         .then((buffer) => {
           getPagesCount(buffer).then((numPages) => {
-            if (numPages > maxNumPages) {
-              toast.error(`File has too many pages (max. ${maxNumPages})`);
+            if (numPages > fileSizeLimits.maxPages) {
+              toast.error(
+                `File has too many pages (max. ${fileSizeLimits.maxPages})`,
+              );
             } else {
               setCurrentFile(file);
             }
@@ -95,17 +130,43 @@ export default function DocumentUpload({
         });
     },
     onDropRejected: (fileRejections) => {
-      const { errors } = fileRejections[0];
+      const { errors, file } = fileRejections[0];
       let message;
       if (errors[0].code === "file-too-large") {
-        message = `File size too big (max. ${maxSize} MB)`;
+        const limitMB = maxSizeMB ?? getFileSizeLimit(file.type, fileSizeLimits);
+        message =
+          maxSizeErrorMessage || `File size too big (max. ${limitMB} MB)`;
+        if (!maxSizeErrorMessage && isFree && !isTrial) {
+          toast.error(message, {
+            description: "Upgrade to a paid plan to increase the limit",
+            action: {
+              label: "Upgrade",
+              onClick: () => router.push("/settings/billing/upgrade"),
+            },
+            duration: 10000,
+          });
+          return;
+        }
       } else if (errors[0].code === "file-invalid-type") {
+        const isSupported = SUPPORTED_DOCUMENT_MIME_TYPES.includes(file.type);
         message = "File type not supported";
+        if (isFree && !isTrial && isSupported) {
+          toast.error(`${message} on free plan`, {
+            description: `Upgrade to a paid plan to upload ${file.type} files`,
+            action: {
+              label: "Upgrade",
+              onClick: () => router.push("/settings/billing/upgrade"),
+            },
+            duration: 10000,
+          });
+          return;
+        }
       } else {
         message = errors[0].message;
       }
       toast.error(message);
     },
+    maxSize: maxSizeBytes,
   });
 
   const imageBlobUrl = useMemo(
@@ -131,16 +192,22 @@ export default function DocumentUpload({
               }}
             />
           ) : null}
-          <div className="text-center">
+
+          <div className="max-w-md text-center">
             {currentFile ? (
               <div className="flex flex-col items-center text-foreground sm:flex-row sm:space-x-2">
                 <div>
                   {fileIcon({
-                    fileType: currentFile.type,
+                    fileType: isHtmlFile({
+                      name: currentFile.name,
+                      contentType: currentFile.type,
+                    })
+                      ? "html"
+                      : currentFile.type,
                     isLight,
                   })}
                 </div>
-                <p>{currentFile.name}</p>
+                <p className="max-w-md truncate">{currentFile.name}</p>
                 <p className="text-gray-500">{bytesToSize(currentFile.size)}</p>
               </div>
             ) : (
@@ -158,9 +225,11 @@ export default function DocumentUpload({
             <p className="text-xs leading-5 text-gray-500">
               {currentFile
                 ? "Replace file?"
-                : isFreePlan && !isTrial
-                  ? `Only *.pdf, *.xls, *.xlsx, *.csv, *.ods & ${maxSize} MB limit`
-                  : `Only *.pdf, *.pptx, *.docx, *.xlsx, *.xls, *.csv, *.ods, *.ppt, *.odp, *.doc, *.odt & ${maxSize} MB limit`}
+                : pdfOnly
+                  ? `Only *.pdf`
+                  : isFree && !isTrial
+                    ? `Only *.pdf, *.xls, *.xlsx, *.csv, *.tsv, *.ods, *.png, *.jpeg, *.jpg`
+                    : `Only *.pdf, *.pptx, *.docx, *.xlsx, *.xls, *.xlsm, *.csv, *.tsv, *.ods, *.ppt, *.odp, *.doc, *.odt, *.rtf, *.txt, *.md, *.dwg, *.dxf, *.png, *.jpg, *.jpeg, *.mp4, *.mov, *.avi, *.webm, *.ogg, *.log${htmlDocumentsEnabled ? ", *.html, *.htm" : ""}`}
             </p>
           </div>
         </div>

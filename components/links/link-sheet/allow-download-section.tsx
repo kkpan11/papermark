@@ -26,9 +26,11 @@ export default function AllowDownloadSection({
   return (
     <div className="pb-5">
       <LinkItem
-        title="Allow downloading"
+        title="Download permissions"
         enabled={enabled}
+        link="https://www.papermark.com/help/article/link-settings"
         action={handleAllowDownload}
+        tooltipContent="Allow visitors to download the content."
       />
     </div>
   );

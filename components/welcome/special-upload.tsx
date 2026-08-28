@@ -4,19 +4,9 @@ import { useEffect, useState } from "react";
 
 import { useTeam } from "@/context/team-context";
 import { LinkType } from "@prisma/client";
-import { motion } from "framer-motion";
 import Cookies from "js-cookie";
-import { usePlausible } from "next-plausible";
+import { motion } from "motion/react";
 import { toast } from "sonner";
-
-import DocumentUpload from "@/components/document-upload";
-import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
-} from "@/components/ui/accordion";
-import { Button } from "@/components/ui/button";
 
 import { useAnalytics } from "@/lib/analytics";
 import { STAGGER_CHILD_VARIANTS } from "@/lib/constants";
@@ -29,13 +19,25 @@ import {
 } from "@/lib/utils";
 import { getSupportedContentType } from "@/lib/utils/get-content-type";
 
+import DocumentUpload from "@/components/document-upload";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
+import { Button } from "@/components/ui/button";
+
 import Skeleton from "../Skeleton";
 import { DEFAULT_LINK_PROPS, DEFAULT_LINK_TYPE } from "../links/link-sheet";
 import { LinkOptions } from "../links/link-sheet/link-options";
 
 export default function DeckGeneratorUpload() {
   const router = useRouter();
-  const plausible = usePlausible();
+  const { groupId } = router.query as {
+    id: string;
+    groupId?: string;
+  };
   const analytics = useAnalytics();
   const [uploading, setUploading] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -44,7 +46,7 @@ export default function DeckGeneratorUpload() {
   const [currentLinkId, setCurrentLinkId] = useState<string | null>(null);
   const [currentDocId, setCurrentDocId] = useState<string | null>(null);
   const [linkData, setLinkData] = useState<DEFAULT_LINK_TYPE>(
-    DEFAULT_LINK_PROPS(LinkType.DOCUMENT_LINK),
+    DEFAULT_LINK_PROPS(LinkType.DOCUMENT_LINK, groupId),
   );
   const teamInfo = useTeam();
 
@@ -92,7 +94,7 @@ export default function DeckGeneratorUpload() {
         return;
       }
 
-      const { type, data, numPages } = await putFile({
+      const { type, data, numPages, fileSize } = await putFile({
         file: currentFile,
         teamId,
       });
@@ -106,6 +108,7 @@ export default function DeckGeneratorUpload() {
         storageType: type!,
         contentType: contentType,
         supportedFileType: supportedFileType,
+        fileSize: fileSize,
       };
       // create a document in the database
       const response = await createDocument({
@@ -120,7 +123,6 @@ export default function DeckGeneratorUpload() {
         const linkId = document.links[0].id;
 
         // track the event
-        plausible("documentUploaded");
         analytics.capture("Document Added", {
           documentId: document.id,
           name: document.name,
@@ -177,6 +179,7 @@ export default function DeckGeneratorUpload() {
         metaImage: blobUrl,
         targetId: currentDocId,
         linkType: LinkType.DOCUMENT_LINK,
+        teamId: teamId,
       }),
     });
 
@@ -323,7 +326,7 @@ export default function DeckGeneratorUpload() {
               </main>
             )}
             {currentLinkId && currentDocId && (
-              <main className="min-h-[300px]">
+              <main className="max-h-[calc(100dvh-10rem)] min-h-[300px] overflow-y-scroll scrollbar-hide">
                 <div className="flex flex-col justify-center">
                   <div className="relative">
                     <div className="flex py-8">

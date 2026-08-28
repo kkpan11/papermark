@@ -1,5 +1,6 @@
 import { NextApiRequest, NextApiResponse } from "next";
 
+import { resolveDefaultBrandId } from "@/ee/features/branding/lib/resolve-base-brand";
 import { getLimits } from "@/ee/limits/server";
 import { authOptions } from "@/pages/api/auth/[...nextauth]";
 import { DataroomFolder, Document, Folder } from "@prisma/client";
@@ -15,13 +16,24 @@ interface FolderWithContents extends Folder {
   childFolders: Omit<FolderWithContents, "parentId">[];
 }
 
+class FolderAccessError extends Error {
+  statusCode = 404;
+
+  constructor() {
+    super("Folder not found");
+    this.name = "FolderAccessError";
+  }
+}
+
 // Recursive function to fetch all folders, child folders, and documents
 async function fetchFolderContents(
   folderId: string,
+  teamId: string,
 ): Promise<FolderWithContents> {
-  const folder = await prisma.folder.findUnique({
+  const folder = await prisma.folder.findFirst({
     where: {
       id: folderId,
+      teamId,
     },
     include: {
       documents: true,
@@ -30,12 +42,26 @@ async function fetchFolderContents(
   });
 
   if (!folder) {
-    throw new Error(`Folder with id ${folderId} not found`);
+    throw new FolderAccessError();
+  }
+
+  const hasCrossTeamDocument = folder.documents.some(
+    (document) => document.teamId !== teamId,
+  );
+  const hasCrossTeamChildFolder = folder.childFolders.some(
+    (childFolder) => childFolder.teamId !== teamId,
+  );
+
+  if (hasCrossTeamDocument || hasCrossTeamChildFolder) {
+    throw new FolderAccessError();
   }
 
   const childFolders = await Promise.all(
     folder.childFolders.map(async (childFolder) => {
-      const nestedChildFolders = await fetchFolderContents(childFolder.id);
+      const nestedChildFolders = await fetchFolderContents(
+        childFolder.id,
+        teamId,
+      );
       return nestedChildFolders;
     }),
   );
@@ -128,6 +154,10 @@ export default async function handle(
     const userId = (session.user as CustomUser).id;
 
     try {
+      if (!folderId || typeof folderId !== "string") {
+        return res.status(400).json({ error: "Missing folderId" });
+      }
+
       const team = await prisma.team.findUnique({
         where: {
           id: teamId,
@@ -153,11 +183,13 @@ export default async function handle(
       }
 
       const limits = await getLimits({ teamId, userId });
+      const stripedTeamPlan = team.plan.replace("+old", "");
 
       if (
         !team.plan.includes("drtrial") &&
-        ["business", "datarooms"].includes(team.plan) &&
+        ["business", "datarooms", "datarooms-plus", "datarooms-premium", "datarooms-unlimited"].includes(stripedTeamPlan) &&
         limits &&
+        limits.datarooms !== null &&
         team._count.datarooms >= limits.datarooms
       ) {
         return res.status(403).json({
@@ -172,22 +204,24 @@ export default async function handle(
           .json({ message: "Trial data room already exists" });
       }
 
-      if (["free", "pro"].includes(team.plan)) {
+      if (["free", "pro"].includes(team.plan) && !team.plan.includes("drtrial")) {
         return res
           .status(400)
           .json({ message: "You need a Business plan to create a data room" });
       }
 
-      // Fetch the folder structure
-      const folderContents = await fetchFolderContents(folderId);
+      const [folderContents, defaultBrandId] = await Promise.all([
+        fetchFolderContents(folderId, teamId),
+        resolveDefaultBrandId(teamId),
+      ]);
 
-      // Create the data room
       const pId = newId("dataroom");
       const dataroom = await prisma.dataroom.create({
         data: {
           pId: pId,
           name: folderContents.name,
           teamId: teamId,
+          brandId: defaultBrandId,
           documents: {
             create: folderContents.documents.map((doc) => ({
               documentId: doc.id,
@@ -218,6 +252,10 @@ export default async function handle(
 
       res.status(201).json(dataroomWithCount);
     } catch (error) {
+      if (error instanceof FolderAccessError) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+
       console.error("Request error", error);
       res.status(500).json({ error: "Error creating dataroom" });
     }

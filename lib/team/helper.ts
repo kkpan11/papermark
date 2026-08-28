@@ -1,4 +1,4 @@
-import { Document, DocumentVersion, Domain, Link, View } from "@prisma/client";
+import { Document, DocumentVersion, Link, View } from "@prisma/client";
 
 import prisma from "@/lib/prisma";
 import { decryptEncrpytedPassword } from "@/lib/utils";
@@ -10,13 +10,6 @@ interface ITeamUserAndDocument {
   userId: string;
   docId?: string;
   checkOwner?: boolean;
-  options?: {};
-}
-
-interface ITeamWithDomain {
-  teamId: string;
-  userId: string;
-  domain?: string;
   options?: {};
 }
 
@@ -91,51 +84,6 @@ export async function getTeamWithUsersAndDocument({
   // }
 
   return { team, document };
-}
-
-export async function getTeamWithDomain({
-  teamId,
-  userId,
-  domain: domainSlug,
-  options,
-}: ITeamWithDomain) {
-  const team = await prisma.team.findUnique({
-    where: {
-      id: teamId,
-    },
-    include: {
-      users: {
-        select: {
-          userId: true,
-        },
-      },
-      domains: {
-        ...options,
-      },
-    },
-  });
-
-  // check if the team exists
-  if (!team) {
-    throw new TeamError("Team doesn't exists");
-  }
-
-  // check if the user is part the team
-  const teamHasUser = team?.users.some((user) => user.userId === userId);
-  if (!teamHasUser) {
-    throw new TeamError("You are not a member of the team");
-  }
-
-  // check if the domain exists in the team
-  let domain: Domain | undefined;
-  if (domainSlug) {
-    domain = team.domains.find((_domain) => _domain.slug === domainSlug);
-    if (!domain) {
-      throw new TeamError("Domain doesn't exists in the team");
-    }
-  }
-
-  return { team, domain };
 }
 
 export async function getDocumentWithTeamAndUser({

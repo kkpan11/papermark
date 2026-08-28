@@ -1,47 +1,170 @@
+import { useState } from "react";
+
 import { useTeam } from "@/context/team-context";
-import {
-  type CredentialCreationOptionsJSON,
-  create,
-} from "@github/webauthn-json";
+import { PlanEnum } from "@/ee/stripe/constants";
 import { toast } from "sonner";
 import { mutate } from "swr";
 
+import { useAnalytics } from "@/lib/analytics";
+import { usePlan } from "@/lib/swr/use-billing";
+import { useTeamSettings } from "@/lib/swr/use-team-settings";
+import { validateContent } from "@/lib/utils/sanitize-html";
+
+import { UpgradePlanModal } from "@/components/billing/upgrade-plan-modal";
 import AppLayout from "@/components/layouts/app";
 import DeleteTeam from "@/components/settings/delete-team";
+import GlobalBlockListForm from "@/components/settings/global-block-list-form";
+import IgnoredDomainsForm from "@/components/settings/ignored-domains-form";
 import { SettingsHeader } from "@/components/settings/settings-header";
-import Passkey from "@/components/shared/icons/passkey";
-import { Button } from "@/components/ui/button";
+import { SurveySettings } from "@/components/settings/survey-settings";
+import { TimezoneSelector } from "@/components/settings/timezone-selector";
 import { Form } from "@/components/ui/form";
 
 export default function General() {
+  const analytics = useAnalytics();
   const teamInfo = useTeam();
+  const teamId = teamInfo?.currentTeam?.id;
+  const { isFree, isPro, isTrial, isStarter } = usePlan();
+  const [selectedPlan, setSelectedPlan] = useState<PlanEnum>(PlanEnum.Pro);
+  const [planModalTrigger, setPlanModalTrigger] = useState<string>("");
+  const [planModalOpen, setPlanModalOpen] = useState<boolean>(false);
 
-  async function registerPasskey() {
-    const createOptionsResponse = await fetch("/api/passkeys/register", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ start: true, finish: false, credential: null }),
-    });
+  // Fetch fresh team settings with proper revalidation
+  const { settings: teamSettings } = useTeamSettings(teamId);
 
-    const { createOptions } = await createOptionsResponse.json();
+  const showUpgradeModal = (plan: PlanEnum, trigger: string) => {
+    setSelectedPlan(plan);
+    setPlanModalTrigger(trigger);
+    setPlanModalOpen(true);
+  };
 
-    // Open "register passkey" dialog
-    const credential = await create(
-      createOptions as CredentialCreationOptionsJSON,
-    );
-
-    const response = await fetch("/api/passkeys/register", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ start: false, finish: true, credential }),
-    });
-
-    if (response.ok) {
-      toast.success("Registered passkey successfully!");
+  const handleExcelAdvancedModeChange = async (data: {
+    enableExcelAdvancedMode: string;
+  }) => {
+    if (
+      (isFree || isPro || isStarter) &&
+      !isTrial &&
+      data.enableExcelAdvancedMode === "true"
+    ) {
+      showUpgradeModal(PlanEnum.Business, "advanced-excel-mode");
       return;
     }
-    // Now the user has registered their passkey and can use it to log in.
-  }
+
+    analytics.capture("Toggle Excel Advanced Mode", {
+      teamId,
+      enableExcelAdvancedMode: data.enableExcelAdvancedMode === "true",
+    });
+
+    const promise = fetch(`/api/teams/${teamId}/update-advanced-mode`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        enableExcelAdvancedMode: data.enableExcelAdvancedMode === "true",
+      }),
+    }).then(async (res) => {
+      if (!res.ok) {
+        const { error } = await res.json();
+        throw new Error(error.message);
+      }
+      await Promise.all([
+        mutate(`/api/teams/${teamId}`),
+        mutate(`/api/teams`),
+        mutate(`/api/teams/${teamId}/settings`),
+      ]);
+      return res.json();
+    });
+
+    toast.promise(promise, {
+      loading: "Updating Excel advanced mode setting...",
+      success: "Successfully updated Excel advanced mode setting!",
+      error: (err) =>
+        err.message || "Failed to update Excel advanced mode setting",
+    });
+
+    return promise;
+  };
+
+  const handleReplicateFoldersChange = async (data: {
+    replicateDataroomFolders: string;
+  }) => {
+    analytics.capture("Toggle Replicate Dataroom Folders", {
+      teamId,
+      replicateDataroomFolders: data.replicateDataroomFolders === "true",
+    });
+
+    const promise = fetch(`/api/teams/${teamId}/update-replicate-folders`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        replicateDataroomFolders: data.replicateDataroomFolders === "true",
+      }),
+    }).then(async (res) => {
+      if (!res.ok) {
+        const { error } = await res.json();
+        throw new Error(error.message);
+      }
+      await Promise.all([
+        mutate(`/api/teams/${teamId}`),
+        mutate(`/api/teams`),
+        mutate(`/api/teams/${teamId}/settings`),
+      ]);
+      return res.json();
+    });
+
+    toast.promise(promise, {
+      loading: "Updating folder replication setting...",
+      success: "Successfully updated folder replication setting!",
+      error: (err) =>
+        err.message || "Failed to update folder replication setting",
+    });
+
+    return promise;
+  };
+
+  const handleTeamNameChange = async (updateData: any) => {
+    try {
+      // Sanitize and validate team name before sending
+      const sanitizedName = validateContent(updateData.name);
+
+      analytics.capture("Update Team Name", {
+        teamId,
+        name: sanitizedName,
+      });
+
+      const promise = fetch(`/api/teams/${teamId}/update-name`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ name: sanitizedName }),
+      }).then(async (res) => {
+        if (!res.ok) {
+          const { error } = await res.json();
+          throw new Error(error.message);
+        }
+        await Promise.all([
+          mutate(`/api/teams/${teamId}`),
+          mutate(`/api/teams`),
+        ]);
+        return res.json();
+      });
+
+      toast.promise(promise, {
+        loading: "Updating team name...",
+        success: "Successfully updated team name!",
+        error: (err) => err.message || "Failed to update team name",
+      });
+
+      return promise;
+    } catch (error) {
+      toast.error((error as Error).message || "Failed to validate team name");
+      throw error;
+    }
+  };
 
   return (
     <AppLayout>
@@ -62,54 +185,60 @@ export default function General() {
             description="This is the name of your team on Papermark."
             inputAttrs={{
               name: "name",
-              defaultValue: teamInfo?.currentTeam?.name,
               placeholder: "My Personal Team",
               maxLength: 32,
             }}
+            defaultValue={teamInfo?.currentTeam?.name ?? ""}
             helpText="Max 32 characters."
-            handleSubmit={(updateData) =>
-              fetch(`/api/teams/${teamInfo?.currentTeam?.id}/update-name`, {
-                method: "PATCH",
-                headers: {
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify(updateData),
-              }).then(async (res) => {
-                if (res.status === 200) {
-                  await Promise.all([
-                    mutate(`/api/teams/${teamInfo?.currentTeam?.id}`),
-                    mutate(`/api/teams`),
-                  ]);
-                  toast.success("Successfully updated team name!");
-                } else {
-                  const { error } = await res.json();
-                  toast.error(error.message);
-                }
-              })
-            }
+            handleSubmit={handleTeamNameChange}
           />
 
-          <div className="rounded-lg border border-muted p-10">
-            <div className="space-y-6">
-              <div className="space-y-3">
-                <h2 className="text-xl font-medium">Register a passkey</h2>
-                <p className="mt-3 text-sm text-secondary-foreground">
-                  Never use a password or oauth again. Register a passkey to
-                  make logging in easy.
-                </p>
-              </div>
-              <Button
-                onClick={() => registerPasskey()}
-                className="flex items-center justify-center space-x-2"
-              >
-                <Passkey className="h-4 w-4" />
-                <span>Register a new passkey</span>
-              </Button>
-            </div>
-          </div>
+          <Form
+            title="Excel Advanced Mode"
+            description="Enable advanced mode for all new Excel files in your team. Existing files will not be affected."
+            inputAttrs={{
+              name: "enableExcelAdvancedMode",
+              type: "checkbox",
+              placeholder: "Enable advanced mode for Excel files",
+            }}
+            defaultValue={String(
+              teamSettings?.enableExcelAdvancedMode ?? false,
+            )}
+            helpText="When enabled, newly uploaded Excel files will be viewed using the Microsoft Office viewer for better formatting and compatibility."
+            handleSubmit={handleExcelAdvancedModeChange}
+            plan={(isFree && !isTrial) || isPro ? "Business" : undefined}
+          />
+
+          <Form
+            title="Replicate Dataroom Folders"
+            description="When uploading folders to a dataroom, also replicate the folder structure in 'All Documents'."
+            inputAttrs={{
+              name: "replicateDataroomFolders",
+              type: "checkbox",
+              placeholder: "Replicate folder structure in All Documents",
+            }}
+            defaultValue={String(
+              teamSettings?.replicateDataroomFolders ?? true,
+            )}
+            helpText="When enabled, folders uploaded to datarooms will be created in 'All Documents' with the same structure. When disabled, all documents will be placed in a single folder named after the dataroom in 'All Documents'."
+            handleSubmit={handleReplicateFoldersChange}
+          />
+          <TimezoneSelector />
+          <IgnoredDomainsForm />
+          <GlobalBlockListForm />
+          <SurveySettings />
 
           <DeleteTeam />
         </div>
+
+        {planModalOpen ? (
+          <UpgradePlanModal
+            clickedPlan={selectedPlan}
+            trigger={planModalTrigger}
+            open={planModalOpen}
+            setOpen={setPlanModalOpen}
+          />
+        ) : null}
       </main>
     </AppLayout>
   );

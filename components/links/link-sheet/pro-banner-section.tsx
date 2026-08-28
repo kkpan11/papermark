@@ -17,6 +17,7 @@ export function ProBannerSection({
     state,
     trigger,
     plan,
+    highlightItem,
   }: LinkUpgradeOptions) => void;
 }) {
   const { showBanner } = data;
@@ -28,7 +29,6 @@ export function ProBannerSection({
 
   const handleShowBanner = () => {
     const updatedShowBanner = !enabled;
-    console.log("updatedShowBanner", updatedShowBanner);
     setData({ ...data, showBanner: updatedShowBanner });
     setEnabled(updatedShowBanner);
   };
@@ -36,7 +36,9 @@ export function ProBannerSection({
   return (
     <div className="pb-5">
       <LinkItem
-        title="Show Visitor Statistics & Papermark Branding"
+        title="Secured by Papermark badge"
+        tooltipContent="Display 'Secured by Papermark' branding on your shared documents"
+        link="https://www.papermark.com/help/article/remove-papermark-branding"
         enabled={enabled}
         action={handleShowBanner}
         isAllowed={isAllowed}
@@ -46,6 +48,7 @@ export function ProBannerSection({
             state: true,
             trigger: "link_sheet_hide_pro_banner_section",
             plan: "Pro",
+            highlightItem: ["branding"],
           })
         }
       />

@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 
-import { motion } from "framer-motion";
+import { motion } from "motion/react";
+
+import { FADE_IN_ANIMATION_SETTINGS } from "@/lib/constants";
+import { stripTrailingPasswordWhitespace } from "@/lib/utils";
 
 import Eye from "@/components/shared/icons/eye";
 import EyeOff from "@/components/shared/icons/eye-off";
 import { Input } from "@/components/ui/input";
-
-import { FADE_IN_ANIMATION_SETTINGS } from "@/lib/constants";
 
 import { DEFAULT_LINK_TYPE } from ".";
 import LinkItem from "./link-item";
@@ -37,9 +38,11 @@ export default function PasswordSection({
   return (
     <div className="pb-5">
       <LinkItem
-        title="Require password to view"
+        title="Password protection"
         enabled={enabled}
         action={handleEnablePassword}
+        tooltipContent="Users must enter a password to access the content."
+        link="https://www.papermark.com/password-protection"
       />
 
       {enabled && (
@@ -59,6 +62,14 @@ export default function PasswordSection({
             placeholder="Enter password"
             onChange={(e) => {
               setData({ ...data, password: e.target.value });
+            }}
+            onBlur={() => {
+              setData((prev) => ({
+                ...prev,
+                password: prev.password
+                  ? stripTrailingPasswordWhitespace(prev.password)
+                  : prev.password,
+              }));
             }}
             aria-invalid="true"
           />

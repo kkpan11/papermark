@@ -15,17 +15,19 @@ export default async function handle(
     // GET /api/teams/:teamId/invitations
     const session = await getServerSession(req, res, authOptions);
     if (!session) {
-      return res.status(401).end("Unauhorized");
+      return res.status(401).end("Unauthorized");
     }
 
     const { teamId } = req.query as { teamId: string };
 
     try {
       // check if currentUser is part of the team with the teamId
-      const userTeam = await prisma.userTeam.findFirst({
+      const userTeam = await prisma.userTeam.findUnique({
         where: {
-          teamId,
-          userId: (session.user as CustomUser).id,
+          userId_teamId: {
+            userId: (session.user as CustomUser).id,
+            teamId,
+          },
         },
       });
 
@@ -57,7 +59,7 @@ export default async function handle(
     // DELETE /api/teams/:teamId/invitations
     const session = await getServerSession(req, res, authOptions);
     if (!session) {
-      return res.status(401).end("Unauhorized");
+      return res.status(401).end("Unauthorized");
     }
 
     const { teamId } = req.query as { teamId: string };
@@ -66,15 +68,21 @@ export default async function handle(
 
     try {
       // check if currentUser is part of the team with the teamId
-      const userTeam = await prisma.userTeam.findFirst({
+      const userTeam = await prisma.userTeam.findUnique({
         where: {
-          teamId,
-          userId: (session.user as CustomUser).id,
+          userId_teamId: {
+            userId: (session.user as CustomUser).id,
+            teamId,
+          },
         },
       });
 
       if (!userTeam) {
         return res.status(403).json("You are not part of this team");
+      }
+
+      if (userTeam.role !== "ADMIN") {
+        return res.status(403).json("Only admins can revoke invitations");
       }
 
       // delete invitation

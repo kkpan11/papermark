@@ -1,18 +1,63 @@
 import { NextApiRequest, NextApiResponse } from "next";
 
-import { LinkAudienceType } from "@prisma/client";
+import { isTeamPausedById } from "@/ee/features/billing/cancellation/lib/is-team-paused";
+import { resolveOwnedBrandId } from "@/ee/features/branding/lib/resolve-base-brand";
+import { LinkAudienceType, Tag } from "@prisma/client";
+import { waitUntil } from "@vercel/functions";
 import { getServerSession } from "next-auth/next";
 
+import {
+  assertDocumentAccess,
+  canAccessDataroom,
+  getAllowedDataroomIds,
+} from "@/lib/api/rbac/entitlements";
+import { isDataroomScopedRole } from "@/lib/api/rbac/permissions";
 import { errorhandler } from "@/lib/errorHandler";
 import prisma from "@/lib/prisma";
+import { CustomUser, WatermarkConfigSchema } from "@/lib/types";
 import {
-  getDocumentWithTeamAndUser,
-  getTeamWithUsersAndDocument,
-} from "@/lib/team/helper";
-import { CustomUser } from "@/lib/types";
-import { generateEncrpytedPassword } from "@/lib/utils";
+  decryptEncrpytedPassword,
+  generateEncrpytedPassword,
+} from "@/lib/utils";
+import { sendLinkCreatedWebhook } from "@/lib/webhook/triggers/link-created";
 
 import { authOptions } from "../auth/[...nextauth]";
+
+export const config = {
+  // in order to enable `waitUntil` function
+  supportsResponseStreaming: true,
+};
+
+export interface DomainObject {
+  id: string;
+  slug: string;
+}
+
+/**
+ * Normalize the list of allowed upload folder ids from the incoming payload,
+ * deduplicating and dropping falsy entries. An empty array represents
+ * "visitor may upload anywhere". An omitted/undefined property is treated as
+ * an empty array; any other non-array shape is rejected so the caller can
+ * surface a 400 instead of silently dropping malformed input.
+ */
+function normalizeUploadFolderIds(linkData: {
+  uploadFolderIds?: unknown;
+}): string[] {
+  if (
+    !Object.prototype.hasOwnProperty.call(linkData, "uploadFolderIds") ||
+    linkData.uploadFolderIds === undefined
+  ) {
+    return [];
+  }
+  if (!Array.isArray(linkData.uploadFolderIds)) {
+    throw new TypeError("uploadFolderIds must be an array.");
+  }
+  const ids: string[] = [];
+  for (const id of linkData.uploadFolderIds) {
+    if (typeof id === "string" && id.length > 0) ids.push(id);
+  }
+  return Array.from(new Set(ids));
+}
 
 export default async function handler(
   req: NextApiRequest,
@@ -25,8 +70,15 @@ export default async function handler(
       return res.status(401).end("Unauthorized");
     }
 
-    const { targetId, linkType, password, expiresAt, ...linkDomainData } =
-      req.body;
+    const {
+      targetId,
+      linkType,
+      password,
+      expiresAt,
+      teamId,
+      enableIndexFile,
+      ...linkDomainData
+    } = req.body;
 
     const userId = (session.user as CustomUser).id;
 
@@ -34,42 +86,94 @@ export default async function handler(
     const documentLink = linkType === "DOCUMENT_LINK";
 
     try {
-      if (documentLink) {
-        // check if the the team that own the document has the current user
-        await getDocumentWithTeamAndUser({
-          docId: targetId,
-          userId,
-          options: {
-            team: {
-              select: {
-                users: {
-                  select: {
-                    userId: true,
-                  },
-                },
-              },
-            },
+      const teamAccess = await prisma.userTeam.findUnique({
+        where: {
+          userId_teamId: {
+            userId,
+            teamId,
           },
+        },
+        select: { teamId: true, role: true },
+      });
+
+      if (!teamAccess) {
+        return res.status(401).json({ error: "Unauthorized." });
+      }
+
+      // Dataroom-scoped members may only create links for documents/datarooms
+      // within their assigned rooms.
+      if (isDataroomScopedRole(teamAccess.role)) {
+        const allowedIds = await getAllowedDataroomIds(userId, teamId);
+        if (dataroomLink) {
+          if (!canAccessDataroom(teamAccess.role, allowedIds, targetId)) {
+            return res
+              .status(403)
+              .json({ error: "You do not have access to this data room." });
+          }
+        } else if (documentLink) {
+          const hasAccess = await assertDocumentAccess({
+            role: teamAccess.role,
+            userId,
+            teamId,
+            documentId: targetId,
+            allowedIds,
+          });
+          if (!hasAccess) {
+            return res
+              .status(403)
+              .json({ error: "You do not have access to this document." });
+          }
+        }
+      }
+
+      // Check if team is paused
+      const teamIsPaused = await isTeamPausedById(teamId);
+      if (teamIsPaused) {
+        return res.status(403).json({
+          error:
+            "Team is currently paused. New link creation is not available.",
         });
       }
 
-      if (dataroomLink) {
-        const dataroom = await prisma.dataroom.findUnique({
-          where: {
-            id: targetId,
-            team: {
-              users: {
-                some: {
-                  userId: userId,
-                },
-              },
-            },
-          },
+      if (!targetId) {
+        return res.status(400).json({
+          error: "A target document or data room is required.",
+        });
+      }
+
+      if (!documentLink && !dataroomLink) {
+        return res.status(400).json({
+          error: "Invalid link type.",
+        });
+      }
+
+      if (documentLink) {
+        const document = await prisma.document.findUnique({
+          where: { id: targetId, teamId },
           select: { id: true },
         });
+        if (!document) {
+          return res.status(400).json({
+            error: "Invalid document.",
+          });
+        }
+      }
 
+      if (dataroomLink && targetId) {
+        const dataroom = await prisma.dataroom.findUnique({
+          where: { id: targetId, teamId },
+          select: { isFrozen: true },
+        });
         if (!dataroom) {
-          return res.status(400).json({ error: "Dataroom not found." });
+          return res.status(400).json({
+            error: "Invalid data room.",
+          });
+        }
+        if (dataroom.isFrozen) {
+          return res.status(403).json({
+            error:
+              "This data room is frozen. You cannot create new links for a frozen data room.",
+          });
         }
       }
 
@@ -81,23 +185,26 @@ export default async function handler(
 
       let { domain, slug, ...linkData } = linkDomainData;
 
-      // set domain and slug to null if the domain is papermark.io
-      if (domain && domain === "papermark.io") {
+      // set domain and slug to null if the domain is papermark.com
+      if (domain && domain === "papermark.com") {
         domain = null;
         slug = null;
       }
 
-      let domainObj;
+      let domainObj: DomainObject | null;
 
       if (domain && slug) {
         domainObj = await prisma.domain.findUnique({
           where: {
             slug: domain,
+            teamId,
           },
         });
 
         if (!domainObj) {
-          return res.status(400).json({ error: "Domain not found." });
+          return res.status(400).json({
+            error: "Domain not found or not associated with this team.",
+          });
         }
 
         const existingLink = await prisma.link.findUnique({
@@ -131,69 +238,265 @@ export default async function handler(
         });
       }
 
+      if (linkData.enableWatermark) {
+        if (!linkData.watermarkConfig) {
+          return res.status(400).json({
+            error:
+              "Watermark configuration is required when watermark is enabled.",
+          });
+        }
+
+        // Validate the watermark config structure
+        const validation = WatermarkConfigSchema.safeParse(
+          linkData.watermarkConfig,
+        );
+        if (!validation.success) {
+          return res.status(400).json({
+            error: "Invalid watermark configuration.",
+            details: validation.error.issues
+              .map((issue) => issue.message)
+              .join(", "),
+          });
+        }
+      }
+
+      // Validate visitor group IDs belong to this team
+      if (linkData.visitorGroupIds?.length > 0) {
+        const validGroups = await prisma.visitorGroup.findMany({
+          where: {
+            id: { in: linkData.visitorGroupIds },
+            teamId: teamId,
+          },
+          select: { id: true },
+        });
+
+        if (validGroups.length !== linkData.visitorGroupIds.length) {
+          return res.status(400).json({
+            error: "One or more visitor group IDs do not belong to this team.",
+          });
+        }
+      }
+
+      // Validate upload folder IDs belong to the target dataroom. Without this
+      // check, a tampered payload could persist arbitrary folder cuids
+      // (including ones from other datarooms/teams) into the link.
+      let validatedUploadFolderIds: string[] = [];
+      let validatedUploadFolders: { id: string; name: string; path: string }[] =
+        [];
+      if (linkData.enableUpload) {
+        let normalizedIds: string[];
+        try {
+          normalizedIds = normalizeUploadFolderIds(linkData);
+        } catch (err) {
+          if (err instanceof TypeError) {
+            return res.status(400).json({ error: err.message });
+          }
+          throw err;
+        }
+
+        if (normalizedIds.length > 0) {
+          if (!dataroomLink || !targetId) {
+            return res.status(400).json({
+              error: "Upload folders can only be assigned to dataroom links.",
+            });
+          }
+
+          const validFolders = await prisma.dataroomFolder.findMany({
+            where: {
+              id: { in: normalizedIds },
+              dataroomId: targetId,
+            },
+            select: { id: true, name: true, path: true },
+          });
+          const byId = new Map(validFolders.map((f) => [f.id, f]));
+
+          if (byId.size !== normalizedIds.length) {
+            return res.status(400).json({
+              error:
+                "One or more upload folders do not belong to this data room.",
+            });
+          }
+
+          validatedUploadFolderIds = normalizedIds.filter((id) => byId.has(id));
+          validatedUploadFolders = validatedUploadFolderIds
+            .map((id) => byId.get(id))
+            .filter(
+              (f): f is { id: string; name: string; path: string } => !!f,
+            );
+        }
+      }
+
+      const resolvedBrandId = await resolveOwnedBrandId(teamId, linkData.brandId);
+
       // Fetch the link and its related document from the database
-      const link = await prisma.link.create({
-        data: {
-          documentId: documentLink ? targetId : null,
-          dataroomId: dataroomLink ? targetId : null,
-          linkType,
-          password: hashedPassword,
-          name: linkData.name || null,
-          emailProtected:
-            linkData.audienceType === LinkAudienceType.GROUP
-              ? true
-              : linkData.emailProtected,
-          emailAuthenticated: linkData.emailAuthenticated,
-          expiresAt: exat,
-          allowDownload: linkData.allowDownload,
-          domainId: domainObj?.id || null,
-          domainSlug: domain || null,
-          slug: slug || null,
-          enableNotification: linkData.enableNotification,
-          enableFeedback: linkData.enableFeedback,
-          enableScreenshotProtection: linkData.enableScreenshotProtection,
-          enableCustomMetatag: linkData.enableCustomMetatag,
-          metaTitle: linkData.metaTitle || null,
-          metaDescription: linkData.metaDescription || null,
-          metaImage: linkData.metaImage || null,
-          allowList: linkData.allowList,
-          denyList: linkData.denyList,
-          audienceType: linkData.audienceType,
-          groupId:
-            linkData.audienceType === LinkAudienceType.GROUP
-              ? linkData.groupId
-              : null,
-          ...(linkData.enableQuestion && {
-            enableQuestion: linkData.enableQuestion,
-            feedback: {
-              create: {
-                data: {
-                  question: linkData.questionText,
-                  type: linkData.questionType,
+      const updatedLink = await prisma.$transaction(async (tx) => {
+        const link = await tx.link.create({
+          data: {
+            documentId: documentLink ? targetId : null,
+            dataroomId: dataroomLink ? targetId : null,
+            linkType,
+            teamId,
+            ownerId: userId,
+            password: hashedPassword,
+            name: linkData.name || null,
+            emailProtected:
+              linkData.audienceType === LinkAudienceType.GROUP
+                ? true
+                : linkData.emailProtected,
+            emailAuthenticated: linkData.emailAuthenticated,
+            expiresAt: exat,
+            allowDownload: linkData.allowDownload,
+            domainId: domainObj?.id || null,
+            domainSlug: domain || null,
+            slug: slug || null,
+            enableIndexFile: enableIndexFile,
+            enableNotification: linkData.enableNotification,
+            enableFeedback: linkData.enableFeedback,
+            enableScreenshotProtection: linkData.enableScreenshotProtection,
+            enableConfidentialView: linkData.enableConfidentialView,
+            enableCustomMetatag: linkData.enableCustomMetatag,
+            metaTitle: linkData.metaTitle || null,
+            metaDescription: linkData.metaDescription || null,
+            metaImage: linkData.metaImage || null,
+            metaFavicon: linkData.metaFavicon || null,
+            welcomeMessage: linkData.welcomeMessage || null,
+            brandId: resolvedBrandId,
+            allowList: linkData.allowList,
+            denyList: linkData.denyList,
+            audienceType: linkData.audienceType,
+            groupId:
+              linkData.audienceType === LinkAudienceType.GROUP
+                ? linkData.groupId
+                : null,
+            ...(linkData.enableQuestion && {
+              enableQuestion: linkData.enableQuestion,
+              feedback: {
+                create: {
+                  data: {
+                    question: linkData.questionText,
+                    type: linkData.questionType,
+                  },
                 },
               },
+            }),
+            ...(linkData.enableAgreement && {
+              enableAgreement: linkData.enableAgreement,
+              agreementId: linkData.agreementId,
+            }),
+            ...(linkData.enableWatermark && {
+              enableWatermark: linkData.enableWatermark,
+              watermarkConfig: linkData.watermarkConfig,
+            }),
+            ...(linkData.enableUpload && {
+              enableUpload: linkData.enableUpload,
+              isFileRequestOnly: linkData.isFileRequestOnly,
+              uploadFolderIds: validatedUploadFolderIds,
+            }),
+            enableAIAgents: linkData.enableAIAgents || false,
+            enableConversation: linkData.enableConversation || false,
+            showBanner: linkData.showBanner,
+            ...(linkData.customFields && {
+              customFields: {
+                createMany: {
+                  data: linkData.customFields.map(
+                    (field: any, index: number) => ({
+                      type: field.type,
+                      identifier: field.identifier,
+                      label: field.label,
+                      placeholder: field.placeholder,
+                      required: field.required,
+                      disabled: field.disabled,
+                      orderIndex: index,
+                    }),
+                  ),
+                },
+              },
+            }),
+            // Connect visitor groups for allow-list
+            ...(linkData.visitorGroupIds?.length > 0 && {
+              visitorGroups: {
+                createMany: {
+                  data: linkData.visitorGroupIds.map(
+                    (visitorGroupId: string) => ({
+                      visitorGroupId,
+                    }),
+                  ),
+                },
+              },
+            }),
+          },
+          include: {
+            customFields: true,
+            visitorGroups: {
+              select: {
+                visitorGroupId: true,
+              },
             },
-          }),
-          ...(linkData.enableAgreement && {
-            enableAgreement: linkData.enableAgreement,
-            agreementId: linkData.agreementId,
-          }),
-          ...(linkData.enableWatermark && {
-            enableWatermark: linkData.enableWatermark,
-            watermarkConfig: linkData.watermarkConfig,
-          }),
-          showBanner: linkData.showBanner,
-        },
+          },
+        });
+
+        if (linkData.enableConversation && dataroomLink) {
+          await tx.dataroom.updateMany({
+            where: { id: targetId, teamId },
+            data: { conversationsEnabled: true },
+          });
+        }
+
+        let tags: Partial<Tag>[] = [];
+        if (linkData.tags?.length) {
+          // create tag items
+          await tx.tagItem.createMany({
+            data: linkData.tags.map((tagId: string) => ({
+              tagId,
+              itemType: "LINK_TAG",
+              linkId: link.id,
+              taggedBy: userId,
+            })),
+            skipDuplicates: true,
+          });
+
+          // return tags
+          tags = await tx.tag.findMany({
+            where: { id: { in: linkData.tags } },
+            select: { id: true, name: true, color: true, description: true },
+          });
+        }
+
+        return { ...link, tags };
       });
 
       const linkWithView = {
-        ...link,
+        ...updatedLink,
+        // Echo the resolved folder allow-list so the client can render chips
+        // with the correct folder names without an extra round-trip.
+        uploadFolders: validatedUploadFolders,
         _count: { views: 0 },
         views: [],
       };
 
       if (!linkWithView) {
         return res.status(404).json({ error: "Link not found" });
+      }
+
+      waitUntil(
+        sendLinkCreatedWebhook({
+          teamId,
+          data: {
+            link_id: linkWithView.id,
+            document_id: linkWithView.documentId,
+            dataroom_id: linkWithView.dataroomId,
+          },
+        }),
+      );
+
+      // Revalidate the view page to pre-generate it
+      await fetch(
+        `${process.env.NEXTAUTH_URL}/api/revalidate?secret=${process.env.REVALIDATE_TOKEN}&linkId=${linkWithView.id}&hasDomain=${linkWithView.domainId ? "true" : "false"}`,
+      );
+
+      // Decrypt the password for the new link
+      if (linkWithView.password !== null) {
+        linkWithView.password = decryptEncrpytedPassword(linkWithView.password);
       }
 
       return res.status(200).json(linkWithView);

@@ -1,11 +1,225 @@
 import { NextApiRequest, NextApiResponse } from "next";
 
 import { authOptions } from "@/pages/api/auth/[...nextauth]";
-import slugify from "@sindresorhus/slugify";
+import {
+  DefaultPermissionStrategy,
+  ItemType,
+  RootItemAccess,
+} from "@prisma/client";
 import { getServerSession } from "next-auth/next";
 
+import { enforceDataroomMemberScope } from "@/lib/api/rbac/guard";
+import { resolveRootItemAccessFlags } from "@/lib/dataroom/root-item-access";
+import { resolveFreeFolderPath } from "@/lib/folders/bulk-create";
 import prisma from "@/lib/prisma";
 import { CustomUser } from "@/lib/types";
+
+async function applyFolderPermissions(
+  dataroomId: string,
+  folderId: string,
+  folderPath: string,
+): Promise<void> {
+  try {
+    await applyDefaultFolderPermissions(dataroomId, folderId, folderPath);
+  } catch (error) {
+    console.error("Error applying folder permissions:", error);
+    throw error;
+  }
+}
+
+async function applyDefaultFolderPermissions(
+  dataroomId: string,
+  folderId: string,
+  folderPath?: string,
+) {
+  const [dataroom, viewerGroups, permissionGroups] = await Promise.all([
+    prisma.dataroom.findUnique({
+      where: { id: dataroomId },
+      select: {
+        defaultPermissionStrategy: true,
+        defaultGroupPermissionStrategy: true,
+        defaultRootItemAccess: true,
+        defaultGroupRootItemAccess: true,
+        teamId: true,
+      },
+    }),
+    prisma.viewerGroup.findMany({
+      where: { dataroomId },
+      select: {
+        id: true,
+      },
+    }),
+    prisma.permissionGroup.findMany({
+      where: { dataroomId },
+      select: {
+        id: true,
+        name: true,
+      },
+    }),
+  ]);
+
+  if (!dataroom) return;
+
+  // Resolve parent folder once if any side wants to inherit. We can't bail
+  // out early for both sides anymore because the group strategy and the
+  // link strategy can disagree.
+  const groupInherits =
+    dataroom.defaultGroupPermissionStrategy ===
+    DefaultPermissionStrategy.INHERIT_FROM_PARENT;
+  const linkInherits =
+    dataroom.defaultPermissionStrategy ===
+    DefaultPermissionStrategy.INHERIT_FROM_PARENT;
+
+  let parentFolderId: string | null = null;
+  if ((groupInherits || linkInherits) && folderPath) {
+    const pathSegments = folderPath.split("/").filter(Boolean);
+    const parentPath = "/" + pathSegments.slice(0, -1).join("/");
+    if (parentPath !== "/") {
+      const parent = await prisma.dataroomFolder.findUnique({
+        where: { dataroomId_path: { dataroomId, path: parentPath } },
+        select: { id: true },
+      });
+      parentFolderId = parent?.id ?? null;
+    }
+  }
+
+  await Promise.all([
+    applyForViewerGroups({
+      dataroomId,
+      folderId,
+      viewerGroups,
+      strategy: dataroom.defaultGroupPermissionStrategy,
+      rootItemAccess: dataroom.defaultGroupRootItemAccess,
+      parentFolderId,
+    }),
+    applyForPermissionGroups({
+      dataroomId,
+      folderId,
+      permissionGroups,
+      strategy: dataroom.defaultPermissionStrategy,
+      rootItemAccess: dataroom.defaultRootItemAccess,
+      parentFolderId,
+    }),
+  ]);
+}
+
+async function applyForViewerGroups(opts: {
+  dataroomId: string;
+  folderId: string;
+  viewerGroups: { id: string }[];
+  strategy: DefaultPermissionStrategy;
+  rootItemAccess: RootItemAccess;
+  parentFolderId: string | null;
+}) {
+  const { folderId, viewerGroups, strategy, rootItemAccess, parentFolderId } =
+    opts;
+
+  if (strategy !== DefaultPermissionStrategy.INHERIT_FROM_PARENT) return;
+  if (viewerGroups.length === 0) return;
+
+  if (parentFolderId) {
+    const parentPerms = await prisma.viewerGroupAccessControls.findMany({
+      where: {
+        itemId: parentFolderId,
+        itemType: ItemType.DATAROOM_FOLDER,
+      },
+      select: { groupId: true, canView: true, canDownload: true },
+    });
+
+    if (parentPerms.length === 0) return;
+
+    await prisma.viewerGroupAccessControls.createMany({
+      data: parentPerms.map((p) => ({
+        groupId: p.groupId,
+        itemId: folderId,
+        itemType: ItemType.DATAROOM_FOLDER,
+        canView: p.canView,
+        canDownload: p.canDownload,
+      })),
+      skipDuplicates: true,
+    });
+    return;
+  }
+
+  const flags = resolveRootItemAccessFlags(rootItemAccess);
+  if (!flags) return;
+
+  await prisma.viewerGroupAccessControls.createMany({
+    data: viewerGroups.map((group) => ({
+      groupId: group.id,
+      itemId: folderId,
+      itemType: ItemType.DATAROOM_FOLDER,
+      canView: flags.canView,
+      canDownload: flags.canDownload,
+    })),
+    skipDuplicates: true,
+  });
+}
+
+async function applyForPermissionGroups(opts: {
+  dataroomId: string;
+  folderId: string;
+  permissionGroups: { id: string }[];
+  strategy: DefaultPermissionStrategy;
+  rootItemAccess: RootItemAccess;
+  parentFolderId: string | null;
+}) {
+  const {
+    folderId,
+    permissionGroups,
+    strategy,
+    rootItemAccess,
+    parentFolderId,
+  } = opts;
+
+  if (strategy !== DefaultPermissionStrategy.INHERIT_FROM_PARENT) return;
+  if (permissionGroups.length === 0) return;
+
+  if (parentFolderId) {
+    const parentPerms = await prisma.permissionGroupAccessControls.findMany({
+      where: {
+        itemId: parentFolderId,
+        itemType: ItemType.DATAROOM_FOLDER,
+      },
+      select: {
+        groupId: true,
+        canView: true,
+        canDownload: true,
+        canDownloadOriginal: true,
+      },
+    });
+
+    if (parentPerms.length === 0) return;
+
+    await prisma.permissionGroupAccessControls.createMany({
+      data: parentPerms.map((p) => ({
+        groupId: p.groupId,
+        itemId: folderId,
+        itemType: ItemType.DATAROOM_FOLDER,
+        canView: p.canView,
+        canDownload: p.canDownload,
+        canDownloadOriginal: p.canDownloadOriginal,
+      })),
+      skipDuplicates: true,
+    });
+    return;
+  }
+
+  const flags = resolveRootItemAccessFlags(rootItemAccess);
+  if (!flags) return;
+
+  await prisma.permissionGroupAccessControls.createMany({
+    data: permissionGroups.map((group) => ({
+      groupId: group.id,
+      itemId: folderId,
+      itemType: ItemType.DATAROOM_FOLDER,
+      canView: flags.canView,
+      canDownload: flags.canDownload,
+      canDownloadOriginal: false,
+    })),
+    skipDuplicates: true,
+  });
+}
 
 export default async function handle(
   req: NextApiRequest,
@@ -31,17 +245,20 @@ export default async function handle(
       include_documents?: string;
     };
 
+    // Scoped members may only read folders for their assigned rooms.
+    if (await enforceDataroomMemberScope({ userId, teamId, dataroomId, res })) {
+      return;
+    }
+
     try {
-      // Check if the user is part of the team
+      // Check team membership and dataroom ownership together.
       const team = await prisma.team.findUnique({
         where: {
           id: teamId,
-          users: {
-            some: {
-              userId: userId,
-            },
-          },
+          users: { some: { userId } },
+          datarooms: { some: { id: dataroomId } },
         },
+        select: { id: true },
       });
 
       if (!team) {
@@ -55,13 +272,19 @@ export default async function handle(
             dataroomId,
             parentId: null,
           },
-          orderBy: [
-            { orderIndex: "asc" },
-            {
-              name: "asc",
-            },
-          ],
-          include: {
+          orderBy: [{ orderIndex: "asc" }, { name: "asc" }],
+          select: {
+            id: true,
+            name: true,
+            path: true,
+            parentId: true,
+            dataroomId: true,
+            orderIndex: true,
+            hierarchicalIndex: true,
+            icon: true,
+            color: true,
+            createdAt: true,
+            updatedAt: true,
             _count: {
               select: { documents: true, childFolders: true },
             },
@@ -83,6 +306,7 @@ export default async function handle(
               select: {
                 id: true,
                 folderId: true,
+                hierarchicalIndex: true,
                 document: {
                   select: {
                     id: true,
@@ -93,11 +317,23 @@ export default async function handle(
               },
             },
             folders: {
-              include: {
+              select: {
+                id: true,
+                name: true,
+                path: true,
+                parentId: true,
+                dataroomId: true,
+                orderIndex: true,
+                hierarchicalIndex: true,
+                icon: true,
+                color: true,
+                createdAt: true,
+                updatedAt: true,
                 documents: {
                   select: {
                     id: true,
                     folderId: true,
+                    hierarchicalIndex: true,
                     document: {
                       select: {
                         id: true,
@@ -135,11 +371,24 @@ export default async function handle(
             name: "asc",
           },
         ],
-        include: {
+        select: {
+          id: true,
+          name: true,
+          path: true,
+          parentId: true,
+          dataroomId: true,
+          orderIndex: true,
+          hierarchicalIndex: true,
+          icon: true,
+          color: true,
+          createdAt: true,
+          updatedAt: true,
           documents: {
             select: {
+              orderIndex: true,
               id: true,
               folderId: true,
+              hierarchicalIndex: true,
               document: {
                 select: {
                   id: true,
@@ -161,6 +410,7 @@ export default async function handle(
             include: {
               documents: {
                 select: {
+                  orderIndex: true,
                   id: true,
                   folderId: true,
                   document: {
@@ -204,25 +454,29 @@ export default async function handle(
       id: string;
     };
 
-    const { name, path } = req.body as { name: string; path?: string };
+    const { name, path, icon, color } = req.body as {
+      name: string;
+      path?: string;
+      icon?: string;
+      color?: string;
+    };
 
-    const childFolderPath = path
-      ? "/" + path + "/" + slugify(name)
-      : "/" + slugify(name);
+    // Scoped members may only create folders within their assigned rooms.
+    if (await enforceDataroomMemberScope({ userId, teamId, dataroomId, res })) {
+      return;
+    }
 
     const parentFolderPath = path ? "/" + path : "/";
 
     try {
-      // Check if the user is part of the team
+      // Check team membership and dataroom ownership together.
       const team = await prisma.team.findUnique({
         where: {
           id: teamId,
-          users: {
-            some: {
-              userId: userId,
-            },
-          },
+          users: { some: { userId } },
+          datarooms: { some: { id: dataroomId } },
         },
+        select: { id: true },
       });
 
       if (!team) {
@@ -243,14 +497,37 @@ export default async function handle(
         },
       });
 
+      const resolved = await resolveFreeFolderPath({
+        name,
+        parentPath: parentFolderPath,
+        findExisting: (candidates) =>
+          prisma.dataroomFolder.findMany({
+            where: { dataroomId, path: { in: candidates } },
+            select: { path: true },
+          }),
+      }).catch((err) => {
+        if (err?.code === "SLUG_EXHAUSTED") return null;
+        throw err;
+      });
+      if (!resolved) {
+        return res.status(400).json({
+          error: "Failed to create folder",
+          message: "Too many folders with similar names",
+        });
+      }
+
       const folder = await prisma.dataroomFolder.create({
         data: {
-          name: name,
-          path: childFolderPath,
+          name: resolved.name,
+          path: resolved.path,
           parentId: parentFolder?.id ?? null,
           dataroomId: dataroomId,
+          icon: icon ?? null,
+          color: color ?? null,
         },
       });
+
+      await applyFolderPermissions(dataroomId, folder.id, resolved.path);
 
       const folderWithDocs = {
         ...folder,
@@ -265,8 +542,8 @@ export default async function handle(
       res.status(500).json({ error: "Error creating folder" });
     }
   } else {
-    // We only allow POST requests
-    res.setHeader("Allow", ["GET"]);
+    // We only allow GET and POST requests
+    res.setHeader("Allow", ["GET", "POST"]);
     return res.status(405).end(`Method ${req.method} Not Allowed`);
   }
 }

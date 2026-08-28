@@ -1,16 +1,17 @@
 import { NextApiRequest, NextApiResponse } from "next";
 
-import { client } from "@/trigger";
-import { DocumentStorageType } from "@prisma/client";
+import { tasks } from "@trigger.dev/sdk";
+
 import { getServerSession } from "next-auth/next";
-import { parsePageId } from "notion-utils";
 
 import { errorhandler } from "@/lib/errorHandler";
-import notion from "@/lib/notion";
 import prisma from "@/lib/prisma";
-import { getTeamWithUsersAndDocument } from "@/lib/team/helper";
+import type { convertFilesToPdfTask } from "@/ee/features/conversions/lib/trigger/convert-files";
+import { convertPdfToImageRoute } from "@/lib/trigger/pdf-to-image-route";
 import { CustomUser } from "@/lib/types";
-import { getExtension, log } from "@/lib/utils";
+import { getExtension, log, serializeFileSize } from "@/lib/utils";
+import { conversionQueueName } from "@/lib/utils/trigger-utils";
+import { documentUploadSchema } from "@/lib/zod/url-validation";
 
 import { authOptions } from "../../../auth/[...nextauth]";
 
@@ -30,31 +31,51 @@ export default async function handle(
 
     const userId = (session.user as CustomUser).id;
 
-    // Assuming data is an object with `name` and `description` properties
+    // Validate request body using Zod schema for security
+    const validationResult = await documentUploadSchema.safeParseAsync({
+      ...req.body,
+      // Ensure type field is provided for validation
+      type: req.body.type || getExtension(req.body.name),
+    });
+
+    if (!validationResult.success) {
+      log({
+        message: `Agreement document validation failed for teamId: ${teamId}. Errors: ${JSON.stringify(validationResult.error.errors)}`,
+        type: "error",
+      });
+      return res.status(400).json({
+        error: "Invalid agreement document data",
+        details: validationResult.error.errors,
+      });
+    }
+
     const {
       name,
       url: fileUrl,
       storageType,
       numPages,
-      type: fileType,
+      type,
       folderPathName,
-    } = req.body as {
-      name: string;
-      url: string;
-      storageType: DocumentStorageType;
-      numPages?: number;
-      type?: string;
-      folderPathName?: string;
-    };
+      fileSize,
+      contentType,
+    } = validationResult.data;
 
     try {
-      await getTeamWithUsersAndDocument({
-        teamId,
-        userId,
+      const team = await prisma.team.findUnique({
+        where: {
+          id: teamId,
+          users: {
+            some: {
+              userId,
+            },
+          },
+        },
+        select: { plan: true },
       });
 
-      // Get passed type property or alternatively, the file extension and save it as the type
-      const type = fileType || getExtension(name);
+      if (!team) {
+        return res.status(401).end("Unauthorized");
+      }
 
       const folder = await prisma.folder.findUnique({
         where: {
@@ -74,7 +95,9 @@ export default async function handle(
           name: name,
           numPages: numPages,
           file: fileUrl,
-          type: type,
+          originalFile: fileUrl,
+          contentType,
+          type,
           storageType,
           ownerId: (session.user as CustomUser).id,
           teamId: teamId,
@@ -85,14 +108,18 @@ export default async function handle(
               emailProtected: false,
               enableFeedback: false,
               enableNotification: false,
+              teamId,
             },
           },
           versions: {
             create: {
               file: fileUrl,
-              type: type,
+              type,
               storageType,
+              originalFile: fileUrl,
+              contentType,
               numPages: numPages,
+              fileSize: fileSize,
               isPrimary: true,
               versionNumber: 1,
             },
@@ -105,21 +132,52 @@ export default async function handle(
         },
       });
 
-      // skip triggering convert-pdf-to-image job for "notion" / "excel" documents
-      if (type === "pdf") {
-        // trigger document uploaded event to trigger convert-pdf-to-image job
-        await client.sendEvent({
-          id: document.versions[0].id, // unique eventId for the run
-          name: "document.uploaded",
-          payload: {
-            documentVersionId: document.versions[0].id,
-            teamId: teamId,
+      const isDownloadOnlyByExtension =
+        /\.(log|err|prj|jgw|tif|tiff|ecw|bak)$/i.test(name);
+
+      if (type === "docs" && !isDownloadOnlyByExtension) {
+        await tasks.trigger<typeof convertFilesToPdfTask>(
+          "convert-files-to-pdf",
+          {
             documentId: document.id,
+            documentVersionId: document.versions[0].id,
+            teamId,
           },
-        });
+          {
+            idempotencyKey: `${teamId}-${document.versions[0].id}-docs`,
+            tags: [
+              `team_${teamId}`,
+              `document_${document.id}`,
+              `version:${document.versions[0].id}`,
+            ],
+            queue: conversionQueueName(team.plan),
+            concurrencyKey: teamId,
+          },
+        );
       }
 
-      return res.status(201).json(document);
+      if (type === "pdf") {
+        await convertPdfToImageRoute.trigger(
+          {
+            documentId: document.id,
+            documentVersionId: document.versions[0].id,
+            teamId,
+            // docId: fileUrl.split("/")[1],
+          },
+          {
+            idempotencyKey: `${teamId}-${document.versions[0].id}`,
+            tags: [
+              `team_${teamId}`,
+              `document_${document.id}`,
+              `version:${document.versions[0].id}`,
+            ],
+            queue: conversionQueueName(team.plan),
+            concurrencyKey: teamId,
+          },
+        );
+      }
+
+      return res.status(201).json(serializeFileSize(document));
     } catch (error) {
       log({
         message: `Failed to create document. \n\n*teamId*: _${teamId}_, \n\n*file*: ${fileUrl} \n\n ${error}`,

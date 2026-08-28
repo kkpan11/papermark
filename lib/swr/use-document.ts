@@ -2,9 +2,8 @@ import { useRouter } from "next/router";
 
 import { useTeam } from "@/context/team-context";
 import { View } from "@prisma/client";
-import { version } from "os";
+import { toast } from "sonner";
 import useSWR from "swr";
-import useSWRImmutable from "swr/immutable";
 
 import { DocumentWithVersion, LinkWithViews } from "@/lib/types";
 import { fetcher } from "@/lib/utils";
@@ -17,7 +16,11 @@ export function useDocument() {
     id: string;
   };
 
-  const { data: document, error } = useSWR<DocumentWithVersion>(
+  const {
+    data: document,
+    error,
+    mutate,
+  } = useSWR<DocumentWithVersion>(
     teamInfo?.currentTeam?.id &&
       id &&
       `/api/teams/${teamInfo?.currentTeam?.id}/documents/${encodeURIComponent(
@@ -25,7 +28,20 @@ export function useDocument() {
       )}`,
     fetcher,
     {
-      dedupingInterval: 10000,
+      // Reduce background-driven revalidation to avoid excessive API traffic
+      dedupingInterval: 30000,
+      revalidateOnFocus: false,
+      revalidateOnReconnect: false,
+      revalidateIfStale: false,
+      onError: (err) => {
+        if (err.status === 404) {
+          toast.error("Document not found", {
+            description:
+              "The document you're looking for doesn't exist or has been moved.",
+          });
+          router.replace("/documents");
+        }
+      },
     },
   );
 
@@ -34,18 +50,27 @@ export function useDocument() {
     primaryVersion: document?.versions[0],
     loading: !error && !document,
     error,
+    mutate,
   };
 }
 
-export function useDocumentLinks() {
+export function useDocumentLinks(documentId?: string) {
   const router = useRouter();
   const teamInfo = useTeam();
 
-  const { id } = router.query as {
+  const { id: routerId } = router.query as {
     id: string;
   };
 
-  const { data: links, error } = useSWR<LinkWithViews[]>(
+  // Allow an explicit documentId (e.g. the dataroom-scoped document page where
+  // router.query.id is the dataroom id, not the document id).
+  const id = documentId ?? routerId;
+
+  const {
+    data: links,
+    error,
+    mutate,
+  } = useSWR<LinkWithViews[]>(
     teamInfo?.currentTeam?.id &&
       id &&
       `/api/teams/${teamInfo?.currentTeam?.id}/documents/${encodeURIComponent(
@@ -61,6 +86,7 @@ export function useDocumentLinks() {
     links,
     loading: !error && !links,
     error,
+    mutate,
   };
 }
 
@@ -84,8 +110,13 @@ interface ViewWithDuration extends View {
   agreementResponse: {
     id: string;
     agreementId: string;
+    signingStatus: string;
+    signedAt: string | null;
+    completedAt: string | null;
     agreement: {
       name: string;
+      contentType: string;
+      signingProvider: string;
     };
   } | null;
   versionNumber: number;
@@ -96,31 +127,67 @@ type TStatsData = {
   hiddenViewCount: number;
   viewsWithDuration: ViewWithDuration[];
   totalViews: number;
+  hiddenFromPause: number;
 };
 
-export function useDocumentVisits(page: number, limit: number) {
+export function useDocumentVisits(
+  page: number,
+  limit: number,
+  documentId?: string,
+  options?: {
+    /**
+     * Scope the visits to a single data room. Required for the `scope` filter
+     * to take effect (the dataroom-scoped document page passes this).
+     */
+    dataroomId?: string;
+    /**
+     * `dataroom` → only this room's visits; `other` → only the document's
+     * direct-link visits (no data room). Only applies when `dataroomId` is set.
+     */
+    scope?: "dataroom" | "other";
+  },
+) {
   const router = useRouter();
   const teamInfo = useTeam();
   const teamId = teamInfo?.currentTeam?.id;
 
-  const { id } = router.query as {
+  const { id: routerId } = router.query as {
     id: string;
   };
 
+  // Allow an explicit documentId (e.g. the dataroom-scoped document page where
+  // router.query.id is the dataroom id, not the document id).
+  const id = documentId ?? routerId;
+
+  const { dataroomId, scope } = options ?? {};
+
+  const query = new URLSearchParams({
+    page: String(page),
+    limit: String(limit),
+  });
+  if (dataroomId) {
+    query.set("dataroomId", dataroomId);
+    if (scope) query.set("scope", scope);
+  }
+
   const cacheKey =
     teamId && id
-      ? `/api/teams/${teamId}/documents/${id}/views?page=${page}&limit=${limit}`
+      ? `/api/teams/${teamId}/documents/${id}/views?${query.toString()}`
       : null;
 
-  const { data: views, error } = useSWR<TStatsData>(cacheKey, fetcher, {
+  const {
+    data: views,
+    error,
+    mutate,
+  } = useSWR<TStatsData>(cacheKey, fetcher, {
     dedupingInterval: 20000,
-    revalidateOnFocus: false,
   });
 
   return {
     views,
     loading: !error && !views,
     error,
+    mutate,
   };
 }
 

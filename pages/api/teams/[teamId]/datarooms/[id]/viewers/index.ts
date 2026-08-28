@@ -3,6 +3,7 @@ import { NextApiRequest, NextApiResponse } from "next";
 import { authOptions } from "@/pages/api/auth/[...nextauth]";
 import { getServerSession } from "next-auth/next";
 
+import { enforceDataroomMemberScope } from "@/lib/api/rbac/guard";
 import { errorhandler } from "@/lib/errorHandler";
 import prisma from "@/lib/prisma";
 import { CustomUser } from "@/lib/types";
@@ -25,14 +26,17 @@ export default async function handle(
     };
     const userId = (session.user as CustomUser).id;
 
+    // Scoped members may only read viewers for their assigned rooms.
+    if (await enforceDataroomMemberScope({ userId, teamId, dataroomId, res })) {
+      return;
+    }
+
     try {
       const team = await prisma.team.findUnique({
         where: {
           id: teamId,
           users: {
-            some: {
-              userId: (session.user as CustomUser).id,
-            },
+            some: { userId },
           },
         },
         select: {
@@ -46,6 +50,7 @@ export default async function handle(
 
       const viewers = await prisma.viewer.findMany({
         where: {
+          teamId: teamId,
           views: {
             some: {
               dataroomId: dataroomId,
@@ -57,6 +62,7 @@ export default async function handle(
           id: true,
           teamId: true,
           email: true,
+          verified: true,
           views: {
             where: {
               dataroomId: dataroomId,
@@ -65,12 +71,11 @@ export default async function handle(
             orderBy: {
               viewedAt: "desc",
             },
-            include: {
-              link: {
-                select: {
-                  name: true,
-                },
-              },
+            select: {
+              id: true,
+              viewedAt: true,
+              downloadedAt: true,
+              viewerName: true,
             },
           },
         },
@@ -100,11 +105,15 @@ export default async function handle(
       });
 
       const returnViews = viewers.map((viewer) => {
+        // Get the name from the most recent view that has a name
+        const viewerName = viewer.views.find((v) => v.viewerName)?.viewerName;
+        
         return {
           ...viewer,
           dataroomName: dataroom?.name,
           lastViewedAt:
             viewer.views.length > 0 ? viewer.views[0].viewedAt : null,
+          viewerName: viewerName || null,
           internal: users.some((user) => user.email === viewer.email), // set internal to true if view.viewerEmail is in the users list
         };
       });

@@ -1,17 +1,22 @@
 import { NextApiRequest, NextApiResponse } from "next";
 
+import { isTeamPausedById } from "@/ee/features/billing/cancellation/lib/is-team-paused";
 import { getLimits } from "@/ee/limits/server";
-import { authOptions } from "@/pages/api/auth/[...nextauth]";
-import { Dataroom, DataroomDocument, DataroomFolder } from "@prisma/client";
-import { getServerSession } from "next-auth/next";
+import {
+  Dataroom,
+  DataroomBrand,
+  DataroomDocument,
+  DataroomFolder,
+} from "@prisma/client";
 
+import { withTeamApi } from "@/lib/api/auth/with-session-team";
 import { newId } from "@/lib/id-helper";
 import prisma from "@/lib/prisma";
-import { CustomUser } from "@/lib/types";
 
 interface DataroomWithContents extends Dataroom {
   documents: DataroomDocument[];
   folders: DataroomFolderWithContents[];
+  brand: Partial<DataroomBrand> | null;
 }
 
 interface DataroomFolderWithContents extends DataroomFolder {
@@ -24,12 +29,14 @@ async function fetchDataroomContents(
   dataroomId: string,
 ): Promise<DataroomWithContents> {
   const dataroom = await prisma.dataroom.findUnique({
-    where: {
-      id: dataroomId,
-    },
+    where: { id: dataroomId },
     include: {
       documents: true,
-      folders: true,
+      folders: {
+        where: { parentId: null }, // Only get root folders initially
+        include: { documents: true },
+      },
+      brand: true,
     },
   });
 
@@ -37,24 +44,48 @@ async function fetchDataroomContents(
     throw new Error(`Dataroom with id ${dataroomId} not found`);
   }
 
-  const transformFolders = (
-    documents: DataroomDocument[],
-    folders: DataroomFolder[],
-  ): DataroomFolderWithContents[] => {
-    return folders.map((folder) => ({
+  // Recursive function to fetch folder contents
+  async function getFolderContents(
+    folderId: string,
+  ): Promise<DataroomFolderWithContents> {
+    const folder = await prisma.dataroomFolder.findUnique({
+      where: { id: folderId },
+      include: {
+        documents: true,
+        childFolders: {
+          include: { documents: true },
+        },
+      },
+    });
+
+    if (!folder) {
+      throw new Error(`Folder with id ${folderId} not found`);
+    }
+
+    const childFolders = await Promise.all(
+      folder.childFolders.map(async (childFolder) => {
+        const nestedContents = await getFolderContents(childFolder.id);
+        return nestedContents;
+      }),
+    );
+
+    return {
       ...folder,
-      documents: documents.filter((doc) => doc.folderId === folder.id),
-      childFolders: transformFolders(
-        documents,
-        folders.filter((f) => f.parentId === folder.id),
-      ),
-    }));
-  };
+      documents: folder.documents,
+      childFolders: childFolders,
+    };
+  }
+
+  // Transform root folders by fetching their complete contents
+  const foldersWithContents = await Promise.all(
+    dataroom.folders.map((folder) => getFolderContents(folder.id)),
+  );
 
   return {
     ...dataroom,
-    documents: dataroom.documents.filter((doc) => !doc.folderId), // only look at root documents
-    folders: transformFolders(dataroom.documents, dataroom.folders),
+    documents: dataroom.documents.filter((doc) => !doc.folderId),
+    folders: foldersWithContents,
+    brand: dataroom.brand,
   };
 }
 
@@ -95,51 +126,25 @@ async function duplicateFolders(
   );
 }
 
-export default async function handle(
-  req: NextApiRequest,
-  res: NextApiResponse,
-) {
-  if (req.method === "POST") {
-    // POST /api/teams/:teamId/datarooms/:id/duplicate
-    const session = await getServerSession(req, res, authOptions);
-    if (!session) {
-      res.status(401).end("Unauthorized");
-      return;
-    }
-
-    const { teamId, id: dataroomId } = req.query as {
-      teamId: string;
-      id: string;
-    };
-    const userId = (session.user as CustomUser).id;
+// POST /api/teams/:teamId/datarooms/:id/duplicate
+const postHandler = withTeamApi(
+  async ({ req, res, teamId, userId, team }) => {
+    const { id: dataroomId } = req.query as { id: string };
 
     try {
-      const team = await prisma.team.findUnique({
-        where: {
-          id: teamId,
-          users: {
-            some: {
-              userId: userId,
-            },
-          },
-        },
-        include: {
-          _count: {
-            select: {
-              datarooms: true,
-            },
-          },
-        },
-      });
-
-      if (!team) {
-        return res.status(401).end("Unauthorized");
-      }
-
       if (team.plan.includes("drtrial")) {
         return res.status(403).json({
           message:
             "You've reached the limit of datarooms. Consider upgrading your plan.",
+        });
+      }
+
+      // Check if team is paused
+      const teamIsPaused = await isTeamPausedById(teamId);
+      if (teamIsPaused) {
+        return res.status(403).json({
+          error:
+            "Team is currently paused. Duplicating dataroom is not available.",
         });
       }
 
@@ -156,13 +161,16 @@ export default async function handle(
       }
 
       // Check if the team has reached the limit of datarooms
-      const limits = await getLimits({ teamId, userId });
-      if (limits && team._count.datarooms >= limits.datarooms) {
-        console.log(
-          "Dataroom limit reached",
-          limits.datarooms,
-          team._count.datarooms,
-        );
+      const [dataroomCount, limits] = await Promise.all([
+        prisma.dataroom.count({ where: { teamId } }),
+        getLimits({ teamId, userId }),
+      ]);
+      if (
+        limits &&
+        limits.datarooms !== null &&
+        dataroomCount >= limits.datarooms
+      ) {
+        console.log("Dataroom limit reached", limits.datarooms, dataroomCount);
         return res.status(400).json({
           message:
             "You've reached the limit of datarooms. Consider upgrading your plan.",
@@ -179,6 +187,7 @@ export default async function handle(
           pId: pId,
           name: dataroomContents.name + " (Copy)",
           teamId: dataroomContents.teamId,
+          brandId: dataroomContents.brandId,
           documents: {
             create: dataroomContents.documents.map((doc) => ({
               documentId: doc.documentId,
@@ -187,30 +196,72 @@ export default async function handle(
           folders: {
             create: [],
           },
+          brand: dataroomContents.brand
+            ? {
+                create: {
+                  logo: dataroomContents.brand.logo,
+                  hideLogo: dataroomContents.brand.hideLogo,
+                  banner: dataroomContents.brand.banner,
+                  brandColor: dataroomContents.brand.brandColor,
+                  accentColor: dataroomContents.brand.accentColor,
+                  accentButtonColor: dataroomContents.brand.accentButtonColor,
+                  applyAccentColorToDataroomView:
+                    dataroomContents.brand.applyAccentColorToDataroomView ??
+                    false,
+                  welcomeMessage: dataroomContents.brand.welcomeMessage,
+                  defaultLanguage: dataroomContents.brand.defaultLanguage,
+                  cardLayout: dataroomContents.brand.cardLayout ?? undefined,
+                  showFolderTree:
+                    dataroomContents.brand.showFolderTree ?? undefined,
+                  viewerLayoutPreset:
+                    dataroomContents.brand.viewerLayoutPreset ?? undefined,
+                  viewerHeaderStyle:
+                    dataroomContents.brand.viewerHeaderStyle ?? undefined,
+                  hideFolderIconsInMain:
+                    dataroomContents.brand.hideFolderIconsInMain ?? undefined,
+                  ctaLabel: dataroomContents.brand.ctaLabel,
+                  ctaUrl: dataroomContents.brand.ctaUrl,
+                  customLinkPreviewEnabled:
+                    dataroomContents.brand.customLinkPreviewEnabled ?? false,
+                  linkPreviewTitle: dataroomContents.brand.linkPreviewTitle,
+                  linkPreviewDescription:
+                    dataroomContents.brand.linkPreviewDescription,
+                  linkPreviewImage: dataroomContents.brand.linkPreviewImage,
+                  linkPreviewFavicon: dataroomContents.brand.linkPreviewFavicon,
+                },
+              }
+            : undefined,
         },
       });
 
-      // Start the recursive creation with the root folders
-      dataroomContents.folders
-        .filter((folder) => !folder.parentId) // only look at root folders
-        .map(async (folder) => {
-          await duplicateFolders(newDataroom.id, folder);
-        });
+      // Changed this section to properly await all folder duplications
+      await Promise.all(
+        dataroomContents.folders
+          .filter((folder) => !folder.parentId)
+          .map((folder) => duplicateFolders(newDataroom.id, folder)),
+      );
 
-      const dataroomWithCount = await prisma.dataroom.findUnique({
-        where: {
-          id: dataroom.id,
-        },
-        include: {
-          _count: { select: { documents: true } },
-        },
-      });
-
-      res.status(201).json(dataroomWithCount);
+      res.status(201).json(newDataroom);
     } catch (error) {
       console.error("Request error", error);
       res.status(500).json({ message: "Error duplicating dataroom" });
     }
+  },
+  {
+    // Duplicating a dataroom creates a new team-level dataroom; scoped members
+    // are excluded (they hold datarooms.write only for rooms they already
+    // manage, and the copy would never be assigned to them).
+    requiredPermissions: ["datarooms.write"],
+    requiredRoles: ["ADMIN", "MANAGER", "MEMBER"],
+  },
+);
+
+export default async function handle(
+  req: NextApiRequest,
+  res: NextApiResponse,
+) {
+  if (req.method === "POST") {
+    return postHandler(req, res);
   } else {
     // We only allow POST requests
     res.setHeader("Allow", ["POST"]);

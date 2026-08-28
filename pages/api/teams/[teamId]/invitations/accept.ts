@@ -13,39 +13,82 @@ export default async function handle(
   res: NextApiResponse,
 ) {
   if (req.method === "GET") {
-    // GET /api/teams/:teamId/invitations/accept
+    // GET /api/teams/:teamId/invitations/accept?token=...&email=...
     const session = await getServerSession(req, res, authOptions);
 
-    const { teamId } = req.query as { teamId: string };
+    const { teamId, token, email } = req.query as {
+      teamId: string;
+      token?: string;
+      email?: string;
+    };
 
+    // Check if user is authenticated
     if (!session) {
-      res.redirect(`/login?next=/api/teams/${teamId}/invitations/accept`);
+      // Store the invitation details in the redirect URL
+      const redirectUrl = `/login?next=/api/teams/${teamId}/invitations/accept`;
+      const params = new URLSearchParams();
+
+      if (token) params.append("token", token);
+      if (email) params.append("email", email);
+
+      const finalRedirectUrl = params.toString()
+        ? `${redirectUrl}&${params.toString()}`
+        : redirectUrl;
+
+      res.redirect(finalRedirectUrl);
       return;
     }
 
     const userId = (session.user as CustomUser).id;
+    const userEmail = (session.user as CustomUser).email;
 
     try {
-      const userTeam = await prisma.userTeam.findFirst({
+      // Check if user is already in the team
+      const userTeam = await prisma.userTeam.findUnique({
         where: {
-          teamId,
-          userId,
-        },
-      });
-
-      if (userTeam) {
-        // User is already in the team
-        return res.redirect(`/documents`);
-      }
-
-      const invitation = await prisma.invitation.findUnique({
-        where: {
-          email_teamId: {
-            email: (session?.user as CustomUser).email!,
+          userId_teamId: {
+            userId,
             teamId,
           },
         },
       });
+
+      if (userTeam) {
+        return res.redirect(`/documents?invitation=teamMember`);
+      }
+
+      // Find the invitation
+      let invitation;
+      if (token && email) {
+        // First try to find by token and email
+        invitation = await prisma.invitation.findFirst({
+          where: {
+            token,
+            email,
+            teamId,
+          },
+        });
+
+        if (!invitation) {
+          console.log("Invitation not found with token and email");
+        }
+      }
+
+      // If not found by token/email or if token/email not provided, try by user email
+      if (!invitation && userEmail) {
+        invitation = await prisma.invitation.findUnique({
+          where: {
+            email_teamId: {
+              email: userEmail,
+              teamId,
+            },
+          },
+        });
+
+        if (!invitation) {
+          console.log("Invitation not found with user email");
+        }
+      }
 
       if (!invitation) {
         return res.status(404).json("Invalid invitation");
@@ -60,17 +103,39 @@ export default async function handle(
         return res.status(410).json("Invitation link has expired");
       }
 
-      await prisma.team.update({
-        where: {
-          id: teamId,
-        },
-        data: {
-          users: {
-            create: {
-              userId,
-            },
+      // Apply the invited role (defaults to MEMBER for legacy invitations) and,
+      // for dataroom-scoped members, create the per-room assignments. Only
+      // datarooms that still belong to the team are assigned.
+      const invitedRole = invitation.role;
+      const assignableDataroomIds =
+        invitedRole === "DATAROOM_MEMBER" && invitation.dataroomIds.length > 0
+          ? (
+              await prisma.dataroom.findMany({
+                where: { id: { in: invitation.dataroomIds }, teamId },
+                select: { id: true },
+              })
+            ).map((d) => d.id)
+          : [];
+
+      await prisma.$transaction(async (tx) => {
+        await tx.userTeam.create({
+          data: {
+            userId,
+            teamId,
+            role: invitedRole,
           },
-        },
+        });
+
+        if (assignableDataroomIds.length > 0) {
+          await tx.userDataroom.createMany({
+            data: assignableDataroomIds.map((dataroomId) => ({
+              userId,
+              teamId,
+              dataroomId,
+            })),
+            skipDuplicates: true,
+          });
+        }
       });
 
       await identifyUser(invitation.email);
@@ -86,7 +151,7 @@ export default async function handle(
         },
       });
 
-      return res.redirect(`/documents`);
+      return res.redirect(`/documents?invitation=accepted`);
     } catch (error) {
       errorhandler(error, res);
     }

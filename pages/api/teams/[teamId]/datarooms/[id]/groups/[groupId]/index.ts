@@ -31,21 +31,16 @@ export default async function handle(
     const userId = (session.user as CustomUser).id;
 
     try {
-      const team = await prisma.team.findUnique({
+      const teamAccess = await prisma.userTeam.findUnique({
         where: {
-          id: teamId,
-          users: {
-            some: {
-              userId: (session.user as CustomUser).id,
-            },
+          userId_teamId: {
+            userId: userId,
+            teamId: teamId,
           },
-        },
-        select: {
-          id: true,
         },
       });
 
-      if (!team) {
+      if (!teamAccess) {
         return res.status(403).end("Unauthorized to access this team");
       }
 
@@ -53,16 +48,33 @@ export default async function handle(
         where: {
           id: groupId,
           dataroomId: dataroomId,
+          teamId: teamId,
         },
         include: {
           members: {
             include: {
-              viewer: true,
+              viewer: {
+                include: {
+                  invitations: {
+                    where: {
+                      groupId: groupId,
+                    },
+                    orderBy: {
+                      sentAt: "desc",
+                    },
+                    take: 1,
+                  },
+                },
+              },
             },
           },
           accessControls: true,
         },
       });
+
+      if (!group) {
+        return res.status(404).end("Group not found");
+      }
 
       return res.status(200).json(group);
     } catch (error) {
@@ -89,17 +101,43 @@ export default async function handle(
       groupId: string;
     };
 
-    const { name } = req.body as { name: string };
+    const { name, allowAll, domains } = req.body as {
+      name?: string;
+      allowAll?: boolean;
+      domains?: string[];
+    };
     const userId = (session.user as CustomUser).id;
 
     try {
+      const teamAccess = await prisma.userTeam.findUnique({
+        where: {
+          userId_teamId: {
+            userId: userId,
+            teamId: teamId,
+          },
+        },
+      });
+      if (!teamAccess) {
+        return res.status(403).end("Unauthorized to access this team");
+      }
+
       const group = await prisma.viewerGroup.update({
         where: {
           id: groupId,
           dataroomId: dataroomId,
+          teamId: teamId,
+          team: {
+            users: {
+              some: {
+                userId: userId,
+              },
+            },
+          },
         },
         data: {
-          name,
+          ...(name && { name }),
+          ...(typeof allowAll === "boolean" && { allowAll }),
+          ...(domains && { domains }),
         },
       });
 
@@ -131,21 +169,38 @@ export default async function handle(
     const userId = (session.user as CustomUser).id;
 
     try {
-      // delete links associated with the group
-      await prisma.link.deleteMany({
+      const teamAccess = await prisma.userTeam.findUnique({
         where: {
-          groupId: groupId,
-          dataroomId: dataroomId,
+          userId_teamId: {
+            userId: userId,
+            teamId: teamId,
+          },
         },
       });
 
-      // delete group
-      await prisma.viewerGroup.delete({
-        where: {
-          id: groupId,
-          dataroomId: dataroomId,
-        },
-      });
+      if (!teamAccess) {
+        return res.status(401).end("Unauthorized");
+      }
+
+      await prisma.$transaction([
+        // delete links associated with the group
+        prisma.link.deleteMany({
+          where: {
+            groupId: groupId,
+            dataroomId: dataroomId,
+            teamId: teamId,
+          },
+        }),
+
+        // delete group
+        prisma.viewerGroup.delete({
+          where: {
+            id: groupId,
+            dataroomId: dataroomId,
+            teamId: teamId,
+          },
+        }),
+      ]);
 
       res.status(200).json({ success: true });
       return;

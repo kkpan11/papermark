@@ -2,8 +2,6 @@ import { useTeam } from "@/context/team-context";
 import { toast } from "sonner";
 import { mutate } from "swr";
 
-import { DataroomHeader } from "@/components/datarooms/dataroom-header";
-import { DataroomNavigation } from "@/components/datarooms/dataroom-navigation";
 import DeleteGroup from "@/components/datarooms/groups/delete-group";
 import { GroupHeader } from "@/components/datarooms/groups/group-header";
 import { GroupNavigation } from "@/components/datarooms/groups/group-navigation";
@@ -26,16 +24,6 @@ export default function DataroomGroupPage() {
   return (
     <AppLayout>
       <div className="relative mx-2 mb-10 mt-4 space-y-8 overflow-hidden px-1 sm:mx-3 md:mx-5 md:mt-5 lg:mx-7 lg:mt-8 xl:mx-10">
-        <header>
-          <DataroomHeader
-            title={dataroom.name}
-            description={dataroom.pId}
-            actions={[]}
-          />
-
-          <DataroomNavigation dataroomId={dataroom.id} />
-        </header>
-
         <GroupHeader dataroomId={dataroom.id} groupName={viewerGroup.name} />
         <div className="mx-auto grid w-full items-start gap-6 md:grid-cols-[180px_1fr] lg:grid-cols-[250px_1fr]">
           <GroupNavigation
@@ -48,10 +36,10 @@ export default function DataroomGroupPage() {
               description="This is the name of your data room group on Papermark."
               inputAttrs={{
                 name: "name",
-                defaultValue: viewerGroup?.name,
                 placeholder: "e.g. Management Team",
                 maxLength: 32,
               }}
+              defaultValue={viewerGroup?.name ?? ""}
               helpText="Max 32 characters"
               handleSubmit={(updateData) =>
                 fetch(
@@ -84,7 +72,7 @@ export default function DataroomGroupPage() {
             <DeleteGroup
               dataroomId={dataroom.id}
               groupId={viewerGroup.id}
-              groupName={viewerGroup.name}
+              groupName={viewerGroup.name.trim()}
             />
           </div>
         </div>

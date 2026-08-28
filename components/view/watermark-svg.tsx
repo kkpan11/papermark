@@ -1,8 +1,7 @@
 import React, { useMemo } from "react";
 
-import Handlebars from "handlebars";
-
 import { WatermarkConfig } from "@/lib/types";
+import { safeTemplateReplace } from "@/lib/utils";
 
 export const SVGWatermark = ({
   config,
@@ -16,16 +15,19 @@ export const SVGWatermark = ({
   pageIndex: number;
 }) => {
   const watermarkText = useMemo(() => {
-    const template = Handlebars.compile(config.text);
-    return template(viewerData);
+    return safeTemplateReplace(config.text, viewerData);
   }, [config.text, viewerData]);
 
   const { width, height } = documentDimensions;
 
-  // Calculate a responsive font size
+  // Font size stays proportional to the rendered document at every size, so the
+  // watermark (and the tiled pattern derived from it) scales uniformly with the
+  // page instead of freezing once the page grows past ~1000px. config.fontSize
+  // is the proportionality coefficient, not a hard ceiling. Keep a small floor
+  // for legibility on thumbnails.
   const calculateFontSize = () => {
     const baseFontSize = Math.min(width, height) * (config.fontSize / 1000);
-    return Math.max(8, Math.min(baseFontSize, config.fontSize)); // Clamp between 8px and config.fontSize
+    return Math.max(8, baseFontSize);
   };
 
   const fontSize = calculateFontSize();

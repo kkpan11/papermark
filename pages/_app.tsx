@@ -3,21 +3,28 @@ import { Inter } from "next/font/google";
 import Head from "next/head";
 
 import { TeamProvider } from "@/context/team-context";
+import { UploadProgressProvider } from "@/context/upload-progress-context";
 import type { Session } from "next-auth";
 import { SessionProvider } from "next-auth/react";
-import PlausibleProvider from "next-plausible";
+import { NuqsAdapter } from "nuqs/adapters/next/pages";
 
+import { EXCLUDED_PATHS } from "@/lib/constants";
+import { useTrackLastVisited } from "@/lib/hooks/use-last-visited";
+
+import { PostHogGroupSync } from "@/components/providers/posthog-group-sync";
 import { PostHogCustomProvider } from "@/components/providers/posthog-provider";
-import { TriggerCustomProvider } from "@/components/providers/trigger-provider";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
-import { EXCLUDED_PATHS } from "@/lib/constants";
-
 import "@/styles/globals.css";
 
 const inter = Inter({ subsets: ["latin"] });
+
+function LastVisitedTracker() {
+  useTrackLastVisited();
+  return null;
+}
 
 export default function App({
   Component,
@@ -28,7 +35,7 @@ export default function App({
     <>
       <Head>
         <title>Papermark | The Open Source DocSend Alternative</title>
-        <meta name="theme-color" content="#000000" />
+        <meta name="theme-color" content="#000000" key="theme-color" />
         <meta
           name="description"
           content="Papermark is an open-source document sharing alternative to DocSend with built-in analytics."
@@ -46,12 +53,12 @@ export default function App({
         />
         <meta
           property="og:image"
-          content="https://www.papermark.io/_static/meta-image.png"
+          content="https://www.papermark.com/_static/meta-image.png"
           key="og-image"
         />
         <meta
           property="og:url"
-          content="https://www.papermark.io"
+          content="https://www.papermark.com"
           key="og-url"
         />
         <meta property="og:type" content="website" />
@@ -66,18 +73,15 @@ export default function App({
         />
         <meta
           name="twitter:image"
-          content="https://www.papermark.io/_static/meta-image.png"
+          content="https://www.papermark.com/_static/meta-image.png"
           key="tw-image"
         />
-        <link rel="icon" href="/favicon.ico" />
+        <link rel="icon" href="/favicon.ico" key="favicon" />
       </Head>
       <SessionProvider session={session}>
         <PostHogCustomProvider>
           <ThemeProvider attribute="class" defaultTheme="light" enableSystem>
-            <PlausibleProvider
-              domain="papermark.io"
-              enabled={process.env.NEXT_PUBLIC_VERCEL_ENV === "production"}
-            >
+            <NuqsAdapter>
               <main className={inter.className}>
                 <Toaster closeButton />
                 <TooltipProvider delayDuration={100}>
@@ -85,14 +89,16 @@ export default function App({
                     <Component {...pageProps} />
                   ) : (
                     <TeamProvider>
-                      <TriggerCustomProvider>
+                      <PostHogGroupSync />
+                      <LastVisitedTracker />
+                      <UploadProgressProvider>
                         <Component {...pageProps} />
-                      </TriggerCustomProvider>
+                      </UploadProgressProvider>
                     </TeamProvider>
                   )}
                 </TooltipProvider>
               </main>
-            </PlausibleProvider>
+            </NuqsAdapter>
           </ThemeProvider>
         </PostHogCustomProvider>
       </SessionProvider>

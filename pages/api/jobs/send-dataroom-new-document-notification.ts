@@ -1,8 +1,10 @@
 import { NextApiRequest, NextApiResponse } from "next";
 
+import { sendDataroomDigestNotification } from "@/lib/emails/send-dataroom-digest-notification";
 import { sendDataroomNotification } from "@/lib/emails/send-dataroom-notification";
 import prisma from "@/lib/prisma";
 import { log } from "@/lib/utils";
+import { generateUnsubscribeUrl } from "@/lib/utils/unsubscribe";
 
 export const config = {
   maxDuration: 120,
@@ -12,47 +14,56 @@ export default async function handle(
   req: NextApiRequest,
   res: NextApiResponse,
 ) {
-  // We only allow POST requests
   if (req.method !== "POST") {
     res.status(405).json({ message: "Method Not Allowed" });
     return;
   }
 
-  // Extract the API Key from the Authorization header
   const authHeader = req.headers.authorization;
-  const token = authHeader?.split(" ")[1]; // Assuming the format is "Bearer [token]"
+  const token = authHeader?.split(" ")[1];
 
-  // Check if the API Key matches
   if (token !== process.env.INTERNAL_API_KEY) {
     res.status(401).json({ message: "Unauthorized" });
     return;
   }
 
-  const { linkId, dataroomId, dataroomDocumentId, viewerId, senderUserId } =
-    req.body as {
-      linkId: string;
-      dataroomId: string;
-      dataroomDocumentId: string;
-      viewerId: string;
-      senderUserId: string;
-    };
+  const {
+    linkUrl,
+    dataroomId,
+    dataroomDocumentId,
+    dataroomDocumentIds,
+    viewerId,
+    senderUserId,
+    teamId,
+  } = req.body as {
+    linkUrl: string;
+    dataroomId: string;
+    dataroomDocumentId?: string;
+    dataroomDocumentIds?: string[];
+    viewerId: string;
+    senderUserId: string | null;
+    teamId: string;
+  };
 
-  let viewer: { email: string; dataroom: { name: string } } | null = null;
+  const docIds =
+    dataroomDocumentIds ??
+    (dataroomDocumentId ? [dataroomDocumentId] : []);
+
+  if (docIds.length === 0) {
+    res.status(400).json({ message: "No document IDs provided" });
+    return;
+  }
+
+  let viewer: { email: string } | null = null;
 
   try {
-    // Fetch the link to verify the settings
     viewer = await prisma.viewer.findUnique({
       where: {
         id: viewerId,
-        dataroomId: dataroomId,
+        teamId,
       },
       select: {
         email: true,
-        dataroom: {
-          select: {
-            name: true,
-          },
-        },
       },
     });
 
@@ -70,12 +81,10 @@ export default async function handle(
     return;
   }
 
-  // POST /api/jobs/send-datarooom-notification
   try {
-    // Fetch the document to verify the settings
-    const document = await prisma.dataroomDocument.findUnique({
+    const documents = await prisma.dataroomDocument.findMany({
       where: {
-        id: dataroomDocumentId,
+        id: { in: docIds },
         dataroomId: dataroomId,
       },
       select: {
@@ -84,34 +93,73 @@ export default async function handle(
             name: true,
           },
         },
+        dataroom: {
+          select: {
+            name: true,
+          },
+        },
       },
     });
 
-    const user = await prisma.user.findUnique({
-      where: { id: senderUserId },
-      select: { email: true },
-    });
-
-    if (!user) {
-      res.status(404).json({ message: "Sender not found." });
+    if (documents.length === 0) {
+      res.status(404).json({ message: "No documents found." });
       return;
     }
 
-    await sendDataroomNotification({
-      dataroomName: viewer.dataroom.name,
-      senderEmail: user.email!,
-      documentName: document?.document.name,
-      to: viewer.email,
-      url: `${process.env.NEXT_PUBLIC_MARKETING_URL}/view/${linkId}?email=${encodeURIComponent(viewer.email)}`,
+    let senderEmail: string | null = null;
+    if (senderUserId) {
+      const user = await prisma.user.findUnique({
+        where: { id: senderUserId },
+        select: { email: true },
+      });
+
+      if (!user) {
+        res.status(404).json({ message: "Sender not found." });
+        return;
+      }
+      senderEmail = user.email!;
+    }
+
+    const unsubscribeUrl = generateUnsubscribeUrl({
+      viewerId,
+      dataroomId,
+      teamId,
     });
 
-    res
-      .status(200)
-      .json({ message: "Successfully sent dataroom notification", viewerId });
+    const dataroomName = documents[0]?.dataroom?.name || "";
+
+    if (documents.length === 1) {
+      await sendDataroomNotification({
+        dataroomName,
+        documentName: documents[0]?.document?.name || "",
+        senderEmail,
+        to: viewer.email!,
+        url: linkUrl,
+        unsubscribeUrl,
+      });
+    } else {
+      await sendDataroomDigestNotification({
+        dataroomName,
+        documents: documents.map((doc) => ({
+          documentName: doc.document?.name || "Untitled",
+        })),
+        senderEmail,
+        to: viewer.email!,
+        url: linkUrl,
+        preferencesUrl: unsubscribeUrl,
+        frequency: "instant",
+      });
+    }
+
+    res.status(200).json({
+      message: "Successfully sent dataroom change notification",
+      viewerId,
+      documentCount: documents.length,
+    });
     return;
   } catch (error) {
     log({
-      message: `Failed to send invite email for dataroom ${dataroomId} to viewer: ${viewerId}. \n\n Error: ${error} \n\n*Metadata*: \`{dataroomId: ${dataroomId}, viewerId: ${viewerId}}\``,
+      message: `Failed to send notification for dataroom ${dataroomId} to viewer: ${viewerId}. \n\n Error: ${error} \n\n*Metadata*: \`{dataroomId: ${dataroomId}, viewerId: ${viewerId}, docCount: ${docIds.length}}\``,
       type: "error",
       mention: true,
     });

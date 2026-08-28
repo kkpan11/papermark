@@ -3,6 +3,7 @@ import { useRouter } from "next/router";
 import { useState } from "react";
 
 import { useTeam } from "@/context/team-context";
+import { SnowflakeIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -15,7 +16,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-import useDatarooms from "@/lib/swr/use-datarooms";
+import useDataroomsSimple from "@/lib/swr/use-datarooms-simple";
 
 import {
   Select,
@@ -32,20 +33,21 @@ export function AddToDataroomModal({
   setOpen,
   documentId,
   documentName,
+  dataroomId,
 }: {
   open: boolean;
   setOpen: React.Dispatch<React.SetStateAction<boolean>>;
   documentId?: string;
   documentName?: string;
+  dataroomId?: string;
 }) {
-  const router = useRouter();
   const [selectedDataroom, setSelectedDataroom] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
 
   const teamInfo = useTeam();
   const teamId = teamInfo?.currentTeam?.id;
 
-  const { datarooms } = useDatarooms();
+  const { datarooms } = useDataroomsSimple();
 
   const handleSubmit = async (event: any) => {
     event.preventDefault();
@@ -87,7 +89,7 @@ export function AddToDataroomModal({
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="sm:max-w-[425px]">
+      <DialogContent className="max-w-[90vw] sm:max-w-[425px]">
         <DialogHeader className="text-start">
           <DialogTitle>
             <span className="font-bold">{documentName}</span>
@@ -97,13 +99,27 @@ export function AddToDataroomModal({
           </DialogDescription>
         </DialogHeader>
         <Select onValueChange={(value) => setSelectedDataroom(value)}>
-          <SelectTrigger className="min-w-fit">
+          <SelectTrigger className="w-[380px] max-w-full [&>span]:max-w-full [&>span]:overflow-hidden [&>span]:truncate [&>span]:text-ellipsis [&>span]:whitespace-nowrap">
             <SelectValue placeholder="Select a dataroom" />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className="w-[380px] max-w-[90vw]">
             {datarooms?.map((dataroom) => (
-              <SelectItem key={dataroom.id} value={dataroom.id}>
-                {dataroom.name}
+              <SelectItem
+                key={dataroom.id}
+                value={dataroom.id}
+                disabled={dataroom.id === dataroomId || dataroom.isFrozen}
+                className="break-words"
+              >
+                <span className="flex items-center gap-1.5 line-clamp-1 break-words">
+                  {dataroom.isFrozen && (
+                    <SnowflakeIcon className="h-3.5 w-3.5 shrink-0 text-blue-500" />
+                  )}
+                  <span className={dataroom.isFrozen ? "text-muted-foreground" : ""}>
+                    {dataroom.name}
+                    {dataroom.id === dataroomId ? " (current)" : ""}
+                    {dataroom.isFrozen ? " (frozen)" : ""}
+                  </span>
+                </span>
               </SelectItem>
             ))}
           </SelectContent>
@@ -121,15 +137,15 @@ export function AddToDataroomModal({
               {!selectedDataroom ? (
                 "Select a dataroom"
               ) : (
-                <>
-                  Add to{" "}
-                  <span className="font-medium">
+                <span className="flex w-full max-w-[350px] items-center justify-center truncate">
+                  Add to
+                  <span className="ml-1 line-clamp-1 truncate font-medium">
                     {
                       datarooms?.filter((d) => d.id === selectedDataroom)[0]
                         .name
                     }
                   </span>
-                </>
+                </span>
               )}
             </Button>
           </DialogFooter>

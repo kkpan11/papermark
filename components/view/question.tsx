@@ -1,10 +1,12 @@
 import { useState } from "react";
+import type { CSSProperties } from "react";
 
-import { motion } from "framer-motion";
 import { ThumbsDownIcon, ThumbsUpIcon } from "lucide-react";
+import { motion } from "motion/react";
 
 import { STAGGER_CHILD_VARIANTS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
+import { createAdaptiveSurfacePalette } from "@/lib/utils/create-adaptive-surface-palette";
 
 export default function Question({
   feedback,
@@ -12,14 +14,17 @@ export default function Question({
   submittedFeedback,
   setSubmittedFeedback,
   isPreview,
+  accentColor,
 }: {
   feedback: { id: string; data: { question: string; type: string } };
   viewId?: string;
   submittedFeedback: boolean;
   setSubmittedFeedback: (submittedFeedback: boolean) => void;
   isPreview?: boolean;
+  accentColor?: string | null;
 }) {
   const [answer, setAnswer] = useState<"yes" | "no" | "">("");
+  const palette = createAdaptiveSurfacePalette(accentColor);
 
   const handleQuestionSubmit = async (answer: string) => {
     if (answer === "") return;
@@ -70,7 +75,10 @@ export default function Question({
           variants={STAGGER_CHILD_VARIANTS}
           className="flex flex-col items-center space-y-10 text-center"
         >
-          <h1 className="font-display max-w-lg text-3xl font-semibold text-white transition-colors sm:text-4xl">
+          <h1
+            className="font-display max-w-lg text-3xl font-semibold transition-colors sm:text-4xl"
+            style={{ color: palette.textColor }}
+          >
             Thanks for your feedback!
           </h1>
         </motion.div>
@@ -100,20 +108,33 @@ export default function Question({
         variants={STAGGER_CHILD_VARIANTS}
         className="flex w-full flex-col items-center space-y-10 text-center"
       >
-        <h1 className="font-display max-w-xl text-3xl font-semibold text-white transition-colors sm:text-4xl">
+        <h1
+          className="font-display max-w-xl text-3xl font-semibold transition-colors sm:text-4xl"
+          style={{ color: palette.textColor }}
+        >
           {feedback.data.question}
         </h1>
       </motion.div>
       <motion.div
         variants={STAGGER_CHILD_VARIANTS}
-        className="grid w-full max-w-sm grid-cols-1 divide-y divide-border rounded-md border border-border text-white md:grid-cols-2 md:divide-x md:divide-y-0"
+        className="grid w-full max-w-sm grid-cols-1 divide-y rounded-md border border-border md:grid-cols-2 md:divide-x md:divide-y-0"
+        style={{
+          color: palette.textColor,
+          borderColor: palette.panelBorderColor,
+        }}
       >
         <button
           onClick={() => handleQuestionSubmit("yes")}
           className={cn(
-            "flex min-h-[200px] flex-col items-center justify-center space-y-5 overflow-hidden p-5 transition-colors hover:bg-gray-200 hover:text-black hover:dark:bg-gray-800 md:p-10",
-            answer === "yes" ? "bg-gray-200 dark:bg-gray-800" : "",
+            "flex min-h-[200px] flex-col items-center justify-center space-y-5 overflow-hidden p-5 transition-colors hover:bg-[var(--feedback-hover-bg)] md:p-10",
+            answer === "yes" ? "bg-[var(--feedback-active-bg)]" : "",
           )}
+          style={
+            {
+              "--feedback-hover-bg": palette.panelHoverBgColor,
+              "--feedback-active-bg": palette.panelActiveBgColor,
+            } as CSSProperties
+          }
         >
           <ThumbsUpIcon
             className="pointer-events-none h-auto w-12 sm:w-12"
@@ -124,9 +145,15 @@ export default function Question({
         <button
           onClick={() => handleQuestionSubmit("no")}
           className={cn(
-            "flex min-h-[200px] flex-col items-center justify-center space-y-5 overflow-hidden p-5 transition-colors hover:bg-gray-200 hover:text-black hover:dark:bg-gray-800 md:p-10",
-            answer === "no" ? "bg-gray-200 dark:bg-gray-800" : "",
+            "flex min-h-[200px] flex-col items-center justify-center space-y-5 overflow-hidden p-5 transition-colors hover:bg-[var(--feedback-hover-bg)] md:p-10",
+            answer === "no" ? "bg-[var(--feedback-active-bg)]" : "",
           )}
+          style={
+            {
+              "--feedback-hover-bg": palette.panelHoverBgColor,
+              "--feedback-active-bg": palette.panelActiveBgColor,
+            } as CSSProperties
+          }
         >
           <ThumbsDownIcon
             className="pointer-events-none h-auto w-12 sm:w-12"

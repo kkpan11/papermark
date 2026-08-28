@@ -11,7 +11,7 @@ import {
   Section,
   Tailwind,
   Text,
-} from "@react-email/components";
+} from "react-email";
 
 const Onboarding4Email = () => {
   const previewText = `The document sharing infrastructure for the modern web`;
@@ -33,27 +33,25 @@ const Onboarding4Email = () => {
               Look professional with custom branding!
             </Text>
             <Text className="text-sm">With Papermark you can:</Text>
-            <Text className="text-sm">
-              <ul className="list-inside list-disc text-sm">
-                <li>
-                  Share documnets with your <strong>custom domain💫</strong>{" "}
-                </li>
+            <ul className="list-inside list-disc text-sm">
+              <li>
+                Share documnets with your <strong>custom domain💫</strong>{" "}
+              </li>
 
-                <li>Remove &quot;powered by Papermark&quot;</li>
-                <li>Add logo and custom colors</li>
-                <li>Share data room with custom domain</li>
-                <li>Add banner and custom brand to data rooms</li>
-              </ul>
-              <Text className="text-sm">
-                (Customization for data rooms is seaprate and available in each
-                data room you create)
-              </Text>
+              <li>Remove &quot;powered by Papermark&quot;</li>
+              <li>Add logo and custom colors</li>
+              <li>Share data room with custom domain</li>
+              <li>Add banner and custom brand to data rooms</li>
+            </ul>
+            <Text className="text-sm">
+              (Customization for data rooms is seaprate and available in each
+              data room you create)
             </Text>
             {/* <Text className="text-sm">You can also use Bulk upload</Text> */}
             <Section className="mb-[32px] mt-[32px] text-center">
               <Button
                 className="rounded bg-black text-center text-xs font-semibold text-white no-underline"
-                href={`https://app.papermark.io/documents?utm_source=onboarding&utm_medium=email&utm_campaign=20240723&utm_content=upload_documents`}
+                href={`https://app.papermark.com/documents?utm_source=onboarding&utm_medium=email&utm_campaign=20240723&utm_content=upload_documents`}
                 style={{ padding: "12px 20px" }}
               >
                 Add your domain and branding
@@ -74,11 +72,11 @@ const Onboarding4Email = () => {
               <Text className="text-xs">
                 © {new Date().getFullYear()}{" "}
                 <a
-                  href="https://www.papermark.io"
-                  className="text-gray-400 no-underline visited:text-gray-400 hover:text-gray-400"
+                  href="https://www.papermark.com"
+                  className="text-gray-400 no-underline"
                   target="_blank"
                 >
-                  papermark.io
+                  papermark.com
                 </a>
               </Text>
               <Text className="text-xs">

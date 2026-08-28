@@ -34,10 +34,21 @@ export class IdGenerator<TPrefixes extends string> {
 
 export const newId = new IdGenerator({
   view: "view",
+  videoView: "vview",
+  linkView: "lview",
   inv: "inv", // invitation
   email: "email",
   doc: "doc",
   page: "page",
   dataroom: "dr",
   preview: "preview",
+  webhook: "wh",
+  webhookEvent: "evt",
+  webhookSecret: "whsec",
+  token: "pmk", // legacy dashboard token prefix (still accepted)
+  tokenLive: "pm_live",
+  clickEvent: "click",
+  preset: "preset",
+  pending: "pending", // for pending uploads
+  upload: "upload", // opaque public upload session handle
 }).id;

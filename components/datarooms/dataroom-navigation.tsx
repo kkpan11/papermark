@@ -1,6 +1,9 @@
+import useLimits from "@/lib/swr/use-limits";
+
 import { NavMenu } from "../navigation-menu";
 
 export const DataroomNavigation = ({ dataroomId }: { dataroomId?: string }) => {
+  const { limits } = useLimits();
   if (!dataroomId) {
     return null;
   }
@@ -8,27 +11,33 @@ export const DataroomNavigation = ({ dataroomId }: { dataroomId?: string }) => {
     <NavMenu
       navigation={[
         {
-          label: "Overview",
-          href: `/datarooms/${dataroomId}`,
-          segment: `/datarooms/[id]`,
-        },
-        {
-          label: "Documents",
+          label: "Data Room",
           href: `/datarooms/${dataroomId}/documents`,
           segment: "documents",
         },
         {
-          label: "Groups",
-          href: `/datarooms/${dataroomId}/groups`,
-          segment: "groups",
+          label: "Permissions",
+          href: `/datarooms/${dataroomId}/permissions`,
+          segment: "permissions",
         },
         {
-          label: "Users",
-          href: `/datarooms/${dataroomId}/users`,
-          segment: "users",
+          label: "Participants",
+          href: `/datarooms/${dataroomId}/participants`,
+          segment: "participants",
         },
         {
-          label: "Customization",
+          label: "Analytics",
+          href: `/datarooms/${dataroomId}/analytics`,
+          segment: "analytics",
+        },
+        {
+          label: "Q&A",
+          href: `/datarooms/${dataroomId}/conversations`,
+          segment: "conversations",
+          limited: !limits?.conversationsInDataroom,
+        },
+        {
+          label: "Branding",
           href: `/datarooms/${dataroomId}/branding`,
           segment: "branding",
         },

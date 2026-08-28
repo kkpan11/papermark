@@ -3,9 +3,13 @@ import { useRouter } from "next/router";
 import React, { useEffect, useRef, useState } from "react";
 
 import { Brand } from "@prisma/client";
-import { usePlausible } from "next-plausible";
+import Cookies from "js-cookie";
 import { ExtendedRecordMap } from "notion-types";
 import { toast } from "sonner";
+
+import { useAnalytics } from "@/lib/analytics";
+import { useDisablePrint } from "@/lib/hooks/use-disable-print";
+import { LinkWithDocument, NotionTheme } from "@/lib/types";
 
 import LoadingSpinner from "@/components/ui/loading-spinner";
 import AccessForm, {
@@ -13,11 +17,12 @@ import AccessForm, {
   DEFAULT_ACCESS_FORM_TYPE,
 } from "@/components/view/access-form";
 
-import { useAnalytics } from "@/lib/analytics";
-import { LinkWithDocument, WatermarkConfig } from "@/lib/types";
-
-import EmailVerificationMessage from "./email-verification-form";
-import ViewData from "./view-data";
+import EmailVerificationMessage from "./access-form/email-verification-form";
+import ViewData, { TViewDocumentData } from "./view-data";
+import {
+  DEFAULT_VIEWER_BACKGROUND_COLOR,
+  ViewerThemeColor,
+} from "./viewer-theme-color";
 
 type RowData = { [key: string]: any };
 type SheetData = {
@@ -31,17 +36,30 @@ export type DEFAULT_DOCUMENT_VIEW_TYPE = {
   file?: string | null;
   pages?:
     | {
-        file: string;
+        file: string | null;
         pageNumber: string;
         embeddedLinks: string[];
-        pageLinks: { href: string; coords: string }[];
-        metadata: { width: number; height: number; scaleFactor: number };
+        pageLinks?:
+          | {
+              href: string;
+              coords: string;
+              isInternal?: boolean;
+              targetPage?: number;
+            }[]
+          | null;
+        metadata: { width: number; height: number; scaleFactor: number } | null;
       }[]
     | null;
   sheetData?: SheetData[] | null;
+  htmlContent?: string | null;
   fileType?: string;
   isPreview?: boolean;
   ipAddress?: string;
+  verificationToken?: string;
+  isTeamMember?: boolean;
+  agentsEnabled?: boolean;
+  isEmbeddable?: boolean;
+  viewerId?: string;
 };
 
 export default function DocumentView({
@@ -58,7 +76,13 @@ export default function DocumentView({
   useAdvancedExcelViewer,
   previewToken,
   disableEditEmail,
-  useCustomAccessForm,
+  urlPasscode,
+  disableEditPassword,
+  hideFooterOnAccessForm,
+  logoOnAccessForm,
+  isEmbedded,
+  annotationsEnabled,
+  textSelectionEnabled,
 }: {
   link: LinkWithDocument;
   userEmail: string | null | undefined;
@@ -67,6 +91,7 @@ export default function DocumentView({
   notionData?: {
     rootNotionPageId: string | null;
     recordMap: ExtendedRecordMap | null;
+    theme: NotionTheme | null;
   };
   brand?: Partial<Brand> | null;
   token?: string;
@@ -76,8 +101,15 @@ export default function DocumentView({
   useAdvancedExcelViewer?: boolean;
   previewToken?: string;
   disableEditEmail?: boolean;
-  useCustomAccessForm?: boolean;
+  urlPasscode?: string;
+  disableEditPassword?: boolean;
+  hideFooterOnAccessForm?: boolean;
+  isEmbedded?: boolean;
+  logoOnAccessForm?: boolean;
+  annotationsEnabled?: boolean;
+  textSelectionEnabled?: boolean;
 }) {
+  useDisablePrint();
   const {
     document,
     emailProtected,
@@ -85,7 +117,6 @@ export default function DocumentView({
     enableAgreement,
   } = link;
 
-  const plausible = usePlausible();
   const analytics = useAnalytics();
   const router = useRouter();
 
@@ -100,6 +131,13 @@ export default function DocumentView({
   );
   const [verificationRequested, setVerificationRequested] =
     useState<boolean>(false);
+  const [verificationToken, setVerificationToken] = useState<string | null>(
+    token ?? null,
+  );
+  const [code, setCode] = useState<string | null>(null);
+  const [isInvalidCode, setIsInvalidCode] = useState<boolean>(false);
+  const viewerBackgroundColor =
+    brand?.accentColor || DEFAULT_VIEWER_BACKGROUND_COLOR;
 
   const handleSubmission = async (): Promise<void> => {
     setIsLoading(true);
@@ -111,6 +149,7 @@ export default function DocumentView({
       body: JSON.stringify({
         ...data,
         email: data.email ?? verifiedEmail ?? userEmail ?? null,
+        password: data.password ?? urlPasscode ?? undefined,
         linkId: link.id,
         documentId: document.id,
         documentName: document.name,
@@ -118,10 +157,12 @@ export default function DocumentView({
         userId: userId ?? null,
         documentVersionId: document.versions[0].id,
         hasPages: document.versions[0].hasPages,
-        token: token ?? null,
-        verifiedEmail: verifiedEmail ?? null,
+        startPage: router.query.p ? Number(router.query.p) : undefined,
         useAdvancedExcelViewer,
         previewToken,
+        code: code ?? undefined,
+        token: verificationToken ?? undefined,
+        verifiedEmail: verifiedEmail ?? undefined,
       }),
     });
 
@@ -129,6 +170,14 @@ export default function DocumentView({
       const fetchData = await response.json();
 
       if (fetchData.type === "email-verification") {
+        analytics.capture("Email Verification Requested", {
+          linkId: link.id,
+          documentId: document.id,
+          documentName: document.name,
+          linkType: "DOCUMENT_LINK",
+          viewerEmail: data.email ?? verifiedEmail ?? userEmail,
+          teamId: link.teamId,
+        });
         setVerificationRequested(true);
         setIsLoading(false);
       } else {
@@ -137,11 +186,17 @@ export default function DocumentView({
           file,
           pages,
           sheetData,
+          htmlContent,
           fileType,
           isPreview,
           ipAddress,
+          verificationToken,
+          agentsEnabled,
+          isEmbeddable,
+          isTeamMember,
+          viewerId,
         } = fetchData as DEFAULT_DOCUMENT_VIEW_TYPE;
-        plausible("documentViewed"); // track the event
+
         analytics.identify(
           userEmail ?? verifiedEmail ?? data.email ?? undefined,
         );
@@ -151,15 +206,35 @@ export default function DocumentView({
           linkType: "DOCUMENT_LINK",
           viewerId: viewId,
           viewerEmail: data.email ?? verifiedEmail ?? userEmail,
+          isEmbedded,
+          isTeamMember,
+          teamId: link.teamId,
         });
+
+        // set the verification token to the cookie
+        if (verificationToken) {
+          Cookies.set("pm_vft", verificationToken, {
+            path: router.asPath.split("?")[0],
+            expires: 1,
+            sameSite: "strict",
+            secure: true,
+          });
+          setCode(null);
+        }
+
         setViewData({
           viewId,
           file,
           pages,
           sheetData,
+          htmlContent,
           fileType,
           isPreview,
           ipAddress,
+          isTeamMember,
+          agentsEnabled,
+          isEmbeddable,
+          viewerId,
         });
         setSubmitted(true);
         setVerificationRequested(false);
@@ -170,18 +245,12 @@ export default function DocumentView({
       toast.error(data.message);
 
       if (data.resetVerification) {
-        const currentQuery = { ...router.query };
-        delete currentQuery.token;
-        delete currentQuery.email;
+        const currentPath = router.asPath.split("?")[0];
 
-        router.replace(
-          {
-            pathname: router.pathname,
-            query: currentQuery,
-          },
-          undefined,
-          { shallow: true },
-        );
+        Cookies.remove("pm_vft", { path: currentPath });
+        setVerificationToken(null);
+        setCode(null);
+        setIsInvalidCode(true);
       }
       setIsLoading(false);
     }
@@ -198,76 +267,108 @@ export default function DocumentView({
   // If link is not submitted and does not have email / password protection, show the access form
   useEffect(() => {
     if (!didMount.current) {
-      if ((!submitted && !isProtected) || token) {
+      if ((!submitted && !isProtected) || token || previewToken) {
         handleSubmission();
       }
       didMount.current = true;
     }
-  }, [submitted, isProtected, token]);
+  }, [submitted, isProtected, token, previewToken]);
 
   // Components to render when email is submitted but verification is pending
   if (verificationRequested) {
     return (
-      <EmailVerificationMessage
-        onSubmitHandler={handleSubmit}
-        data={data}
-        isLoading={isLoading}
-      />
+      <>
+        <ViewerThemeColor color={brand?.accentColor} />
+        <EmailVerificationMessage
+          onSubmitHandler={handleSubmit}
+          data={data}
+          isLoading={isLoading}
+          code={code}
+          setCode={setCode}
+          isInvalidCode={isInvalidCode}
+          setIsInvalidCode={setIsInvalidCode}
+          brand={brand}
+        />
+      </>
     );
   }
 
-  // If link is not submitted and does not have email / password protection, show the access form
+  // If link is not submitted and is protected by email / password, show the access form
   if (!submitted && isProtected) {
     return (
-      <AccessForm
-        data={data}
-        email={userEmail}
-        setData={setData}
-        onSubmitHandler={handleSubmit}
-        requireEmail={emailProtected}
-        requirePassword={!!linkPassword}
-        requireAgreement={enableAgreement!}
-        agreementContent={link.agreement?.content}
-        requireName={link.agreement?.requireName}
-        isLoading={isLoading}
-        brand={brand}
-        disableEditEmail={disableEditEmail}
-        useCustomAccessForm={useCustomAccessForm}
-      />
+      <>
+        <ViewerThemeColor color={brand?.accentColor} />
+        <AccessForm
+          data={data}
+          email={userEmail}
+          password={urlPasscode}
+          setData={setData}
+          onSubmitHandler={handleSubmit}
+          requireEmail={emailProtected}
+          requirePassword={!!linkPassword}
+          requireAgreement={enableAgreement!}
+          agreementId={link.agreement?.id}
+          agreementName={link.agreement?.name}
+          agreementContent={link.agreement?.content}
+          agreementContentType={link.agreement?.contentType}
+          signingProvider={link.agreement?.signingProvider}
+          requireName={link.agreement?.requireName}
+          isLoading={isLoading}
+          brand={brand}
+          linkId={link.id}
+          disableEditEmail={disableEditEmail}
+          disableEditPassword={disableEditPassword}
+          hideFooterOnAccessForm={hideFooterOnAccessForm}
+          linkType="DOCUMENT_LINK"
+          customFields={link.customFields}
+          logoOnAccessForm={logoOnAccessForm}
+          linkWelcomeMessage={link.welcomeMessage}
+        />
+      </>
     );
   }
 
   if (isLoading) {
     return (
-      <div className="flex h-screen items-center justify-center">
-        <LoadingSpinner className="h-20 w-20" />
-      </div>
-    );
-  }
-  return (
-    <div
-      className="bg-gray-950"
-      style={{
-        backgroundColor:
-          brand && brand.accentColor ? brand.accentColor : "rgb(3, 7, 18)",
-      }}
-    >
-      {submitted ? (
-        <ViewData
-          link={link}
-          viewData={viewData}
-          notionData={notionData}
-          brand={brand}
-          showPoweredByBanner={showPoweredByBanner}
-          showAccountCreationSlide={showAccountCreationSlide}
-          useAdvancedExcelViewer={useAdvancedExcelViewer}
-          viewerEmail={data.email ?? verifiedEmail ?? userEmail ?? undefined}
-        />
-      ) : (
+      <>
+        <ViewerThemeColor color={brand?.accentColor} />
         <div className="flex h-screen items-center justify-center">
           <LoadingSpinner className="h-20 w-20" />
         </div>
-      )}
-    </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <ViewerThemeColor color={viewerBackgroundColor} />
+      <div
+        className="bg-gray-950"
+        style={{
+          backgroundColor: viewerBackgroundColor,
+        }}
+      >
+        {submitted ? (
+          <ViewData
+            link={link}
+            viewData={viewData}
+            document={document as unknown as TViewDocumentData}
+            notionData={notionData}
+            brand={brand}
+            showPoweredByBanner={showPoweredByBanner}
+            showAccountCreationSlide={showAccountCreationSlide}
+            useAdvancedExcelViewer={useAdvancedExcelViewer}
+            viewerEmail={data.email ?? verifiedEmail ?? userEmail ?? undefined}
+            annotationsEnabled={annotationsEnabled}
+            textSelectionEnabled={textSelectionEnabled}
+            previewToken={previewToken}
+          />
+        ) : (
+          <div className="flex h-screen items-center justify-center">
+            <LoadingSpinner className="h-20 w-20" />
+          </div>
+        )}
+      </div>
+    </>
   );
 }
